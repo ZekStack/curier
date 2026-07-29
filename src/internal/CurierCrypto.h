@@ -1,0 +1,44 @@
+#pragma once
+
+#include "../Curier.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace curier_internal {
+
+class CurierCrypto {
+  public:
+	CurierCrypto();
+	~CurierCrypto();
+
+	CurierCrypto(const CurierCrypto &) = delete;
+	CurierCrypto &operator=(const CurierCrypto &) = delete;
+
+	CurierResult init();
+	CurierResult validateVapid(const CurierVapid &vapid);
+	CurierResult validateSubscription(const CurierSubscription &subscription);
+	CurierResult encrypt(
+	    const std::string &plaintext,
+	    const CurierSubscription &subscription,
+	    std::vector<uint8_t> &body
+	);
+	CurierResult createVapidJwt(
+	    const CurierVapid &vapid,
+	    const std::string &audience,
+	    uint64_t nowEpochSeconds,
+	    uint32_t lifetimeSeconds,
+	    std::string &jwt,
+	    uint64_t &expiresAt
+	);
+
+	static bool base64UrlDecode(const std::string &input, std::vector<uint8_t> &output);
+	static bool base64UrlEncode(const uint8_t *input, size_t inputSize, std::string &output);
+
+  private:
+	struct State;
+	State *_state = nullptr;
+};
+
+} // namespace curier_internal
