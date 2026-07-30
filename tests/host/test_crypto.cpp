@@ -1,6 +1,7 @@
 #include "Curier.h"
 #include "internal/CurierCrypto.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
