@@ -2,11 +2,17 @@
 
 #include "../Curier.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace curier_internal {
+
+struct CurierEncryptionInputs {
+	std::array<uint8_t, 32> senderPrivateKey{};
+	std::array<uint8_t, 16> salt{};
+};
 
 class CurierCrypto {
   public:
@@ -22,6 +28,12 @@ class CurierCrypto {
 	CurierResult encrypt(
 	    const std::string &plaintext,
 	    const CurierSubscription &subscription,
+	    std::vector<uint8_t> &body
+	);
+	CurierResult encryptWithInputsForTesting(
+	    const std::string &plaintext,
+	    const CurierSubscription &subscription,
+	    const CurierEncryptionInputs &inputs,
 	    std::vector<uint8_t> &body
 	);
 	CurierResult createVapidJwt(
