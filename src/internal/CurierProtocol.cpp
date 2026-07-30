@@ -1,7 +1,14 @@
 #include "CurierProtocol.h"
 
+#include <array>
 #include <cctype>
 #include <cstdlib>
+
+#if __has_include(<arpa/inet.h>)
+#include <arpa/inet.h>
+#elif __has_include(<lwip/inet.h>)
+#include <lwip/inet.h>
+#endif
 
 namespace {
 
@@ -46,6 +53,37 @@ bool parsePort(const std::string &value, uint16_t &port) {
 	return true;
 }
 
+bool validDnsOrIpv4Host(const std::string &host) {
+	if (host.empty() || host.front() == '.' || host.back() == '.') {
+		return false;
+	}
+	size_t labelStart = 0;
+	for (size_t index = 0; index <= host.size(); ++index) {
+		if (index != host.size() && host[index] != '.') {
+			const unsigned char value = static_cast<unsigned char>(host[index]);
+			if (!std::isalnum(value) && host[index] != '-') {
+				return false;
+			}
+			continue;
+		}
+		if (index == labelStart || index - labelStart > 63 || host[labelStart] == '-' ||
+		    host[index - 1] == '-') {
+			return false;
+		}
+		labelStart = index + 1;
+	}
+	return host.size() <= 253;
+}
+
+bool validBracketedIpv6(const std::string &host) {
+	if (host.size() < 4 || host.front() != '[' || host.back() != ']') {
+		return false;
+	}
+	const std::string address = host.substr(1, host.size() - 2);
+	std::array<uint8_t, 16> parsed{};
+	return inet_pton(AF_INET6, address.c_str(), parsed.data()) == 1;
+}
+
 } // namespace
 
 namespace curier_internal {
@@ -54,7 +92,7 @@ CurierResult
 endpointOrigin(const std::string &endpoint, size_t maxEndpointBytes, std::string &origin) {
 	origin.clear();
 	if (endpoint.empty() || endpoint.size() > maxEndpointBytes || !startsWithHttps(endpoint) ||
-	    endpoint.find('#') != std::string::npos) {
+	    endpoint.find('#') != std::string::npos || endpoint.find('\\') != std::string::npos) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidSubscription,
 		    "subscription endpoint must be a bounded HTTPS URL without a fragment"
@@ -83,13 +121,20 @@ endpointOrigin(const std::string &endpoint, size_t maxEndpointBytes, std::string
 	bool explicitPort = false;
 	if (authority.front() == '[') {
 		const size_t closing = authority.find(']');
-		if (closing == std::string::npos || closing <= 1) {
+		if (closing == std::string::npos || closing <= 1 ||
+		    authority.find(']', closing + 1) != std::string::npos) {
 			return CurierResult::failure(
 			    CurierStatus::InvalidSubscription,
 			    "subscription endpoint IPv6 host is invalid"
 			);
 		}
 		host = authority.substr(0, closing + 1);
+		if (!validBracketedIpv6(host)) {
+			return CurierResult::failure(
+			    CurierStatus::InvalidSubscription,
+			    "subscription endpoint IPv6 host is invalid"
+			);
+		}
 		if (closing + 1 < authority.size()) {
 			if (authority[closing + 1] != ':' || !parsePort(authority.substr(closing + 2), port)) {
 				return CurierResult::failure(
@@ -100,10 +145,23 @@ endpointOrigin(const std::string &endpoint, size_t maxEndpointBytes, std::string
 			explicitPort = true;
 		}
 	} else {
-		const size_t colon = authority.rfind(':');
-		if (colon != std::string::npos) {
-			host = authority.substr(0, colon);
-			if (!parsePort(authority.substr(colon + 1), port)) {
+		if (authority.find('[') != std::string::npos || authority.find(']') != std::string::npos) {
+			return CurierResult::failure(
+			    CurierStatus::InvalidSubscription,
+			    "subscription endpoint host is invalid"
+			);
+		}
+		const size_t firstColon = authority.find(':');
+		const size_t lastColon = authority.rfind(':');
+		if (firstColon != std::string::npos && firstColon != lastColon) {
+			return CurierResult::failure(
+			    CurierStatus::InvalidSubscription,
+			    "subscription endpoint IPv6 hosts must be bracketed"
+			);
+		}
+		if (firstColon != std::string::npos) {
+			host = authority.substr(0, firstColon);
+			if (!parsePort(authority.substr(firstColon + 1), port)) {
 				return CurierResult::failure(
 				    CurierStatus::InvalidSubscription,
 				    "subscription endpoint port is invalid"
@@ -113,13 +171,14 @@ endpointOrigin(const std::string &endpoint, size_t maxEndpointBytes, std::string
 		} else {
 			host = authority;
 		}
+		if (!validDnsOrIpv4Host(host)) {
+			return CurierResult::failure(
+			    CurierStatus::InvalidSubscription,
+			    "subscription endpoint host is invalid"
+			);
+		}
 	}
-	if (host.empty()) {
-		return CurierResult::failure(
-		    CurierStatus::InvalidSubscription,
-		    "subscription endpoint host is required"
-		);
-	}
+
 	for (char character : host) {
 		const unsigned char value = static_cast<unsigned char>(character);
 		if (value <= 32 || value >= 127) {
