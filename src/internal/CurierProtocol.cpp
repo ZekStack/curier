@@ -4,10 +4,13 @@
 #include <cctype>
 #include <cstdlib>
 
-#if __has_include(<arpa/inet.h>)
+#if defined(ARDUINO_ARCH_ESP32)
+extern "C" {
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
+}
+#elif __has_include(<arpa/inet.h>)
 #include <arpa/inet.h>
-#elif __has_include(<lwip/inet.h>)
-#include <lwip/inet.h>
 #endif
 
 namespace {
