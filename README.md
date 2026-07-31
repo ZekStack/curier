@@ -134,10 +134,17 @@ void loop() {
 * Every accepted job receives exactly one callback before a successful `end()`
   returns. Queued and retrying jobs are completed as `Cancelled` during
   shutdown.
-* Do not call `end()` or destroy Curier from its own callback. `end()` returns
-  `Busy` from that context.
+* Calling `end()` from Curier's callback returns `Busy`. Destroying the Curier
+  instance from that callback is a fatal programming error; schedule destruction
+  on another application task.
+* A successful `end()` means the worker task has been deleted with the matching
+  normal or capability-aware API and all owned runtime state has been released.
+  A timeout preserves the `Stopping` state so a later call can finish cleanup.
 * `queueSize` bounds all accepted jobs, including the active job.
 * Subscriptions and JSON are validated and copied before `send()` returns.
+* Subscription endpoint authorities are validated before the HTTP request and
+  VAPID audience are constructed. Malformed ports and unbracketed IPv6 are
+  rejected.
 * The default clock is `std::time(nullptr)`. Configure system time before
   delivery, for example with Tempo, SNTP, or another clock owner.
 * HTTPS verification is enabled by default through the ESP-IDF certificate
@@ -274,6 +281,14 @@ Transport and delivery details are separate in the terminal result:
 * `result.transportError` contains the ESP-IDF transport error.
 * `result.statusCode` contains the HTTP response code when available.
 * `result.attempts` is the number of delivery attempts.
+
+## Release qualification
+
+The host suite compares Curier's encrypted body byte-for-byte with the RFC 8291
+Appendix A vector and independently verifies generated VAPID ES256 signatures.
+Target sketches exercise queue bounds, callbacks, retries, cancellation,
+timeout recovery, and repeated Internal, Auto, and PSRAM lifecycle cleanup.
+Run the target sketches on the production board before tagging a release.
 
 ## License
 

@@ -99,16 +99,19 @@ inline BaseType_t create(
 	);
 }
 
-inline void deleteCurrent(bool createdWithCaps) {
+inline void destroy(TaskHandle_t handle, bool createdWithCaps) {
+	if (handle == nullptr) {
+		return;
+	}
 #if CURIER_CAN_USE_EXTERNAL_STACKS
 	if (createdWithCaps) {
-		vTaskDeleteWithCaps(xTaskGetCurrentTaskHandle());
+		vTaskDeleteWithCaps(handle);
 		return;
 	}
 #else
 	(void)createdWithCaps;
 #endif
-	vTaskDelete(nullptr);
+	vTaskDelete(handle);
 }
 
 } // namespace curier_internal::task

@@ -7,6 +7,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: curier-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
   PIOARDUINO_PLATFORM_VERSION: 55.03.39
@@ -36,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Audit library boundaries and content encoding
+      - name: Audit library boundaries, protocol, and lifecycle
         run: |
           if grep -RInE '#include[[:space:]]+[<"](Accord|Flow|Fresh|Link|Phase|Pulse|Seal|Signal|Tempo|Trace|Worker)\.h[>"]' src; then
             echo "Curier must not depend on another ZekStack library"
@@ -44,6 +48,18 @@ jobs:
           fi
           if grep -RInE '"aesgcm"|Content-Encoding:[[:space:]]+aesgcm' src; then
             echo "Legacy aesgcm encoding is forbidden"
+            exit 1
+          fi
+          if grep -RIn '_impl\.release' src; then
+            echo "Curier must not leak its implementation from callback destruction"
+            exit 1
+          fi
+          if grep -RIn 'deleteCurrent' src; then
+            echo "Curier workers must be deleted by the owner task"
+            exit 1
+          fi
+          if ! grep -q 'task::destroy(worker, createdWithCaps)' src/Curier.cpp; then
+            echo "Curier end() must delete the worker before cleanup"
             exit 1
           fi
 
@@ -63,9 +79,38 @@ jobs:
             -o /tmp/curier-host-tests
           /tmp/curier-host-tests
 
+  crypto-tests:
+    runs-on: ubuntu-latest
+    needs: source-audit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install host crypto dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev
+          python -m pip install --upgrade "pioarduino==${PIOARDUINO_VERSION}"
+          pio pkg install -g -l "bblanchon/ArduinoJson@7.0.0"
+      - name: Build and run RFC 8291 and VAPID tests
+        run: |
+          ARDUINOJSON_HEADER="$(find ~/.platformio -type f -path '*/ArduinoJson/src/ArduinoJson.h' -print -quit)"
+          test -n "$ARDUINOJSON_HEADER"
+          ARDUINOJSON_INCLUDE="$(dirname "$ARDUINOJSON_HEADER")"
+          g++ -std=c++20 -Wall -Wextra -pedantic \
+            -I"$ARDUINOJSON_INCLUDE" \
+            -Itests/host/stubs \
+            -Isrc \
+            src/internal/CurierCrypto.cpp \
+            tests/host/test_crypto.cpp \
+            -lmbedtls -lmbedx509 -lmbedcrypto \
+            -o /tmp/curier-crypto-tests
+          /tmp/curier-crypto-tests
+
   build-examples:
     runs-on: ubuntu-latest
-    needs: [source-audit, host-tests]
+    needs: [source-audit, host-tests, crypto-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -102,20 +147,29 @@ jobs:
               --project-option "build_unflags=-std=gnu++11" \
               --project-option "build_flags=-std=gnu++20"
           done
-      - name: Compile lifecycle smoke test
-        if: matrix.board == 'esp32dev'
+      - name: Compile lifecycle stress test
         run: |
           pio ci tests/esp32/LifecycleSmoke \
-            --board esp32dev \
+            --board "${{ matrix.board }}" \
             --lib="." \
             --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
             --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0" \
             --project-option "build_unflags=-std=gnu++11" \
             --project-option "build_flags=-std=gnu++20"
+      - name: Compile runtime semantics test
+        if: matrix.board == 'esp32dev'
+        run: |
+          pio ci tests/esp32/RuntimeSemantics \
+            --board "${{ matrix.board }}" \
+            --lib="." \
+            --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
+            --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0" \
+            --project-option "build_unflags=-std=gnu++11" \
+            --project-option "build_flags=-std=gnu++20 -DCURIER_ENABLE_TEST_HOOKS"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [metadata, clang-format, host-tests, build-examples]
+    needs: [metadata, clang-format, source-audit, host-tests, crypto-tests, build-examples]
     runs-on: ubuntu-latest
     permissions:
       contents: write

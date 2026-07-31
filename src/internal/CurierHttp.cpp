@@ -3,6 +3,7 @@
 #include <climits>
 #include <cstring>
 #include <strings.h>
+#include <utility>
 
 extern "C" {
 #include "esp_http_client.h"
@@ -22,6 +23,10 @@ namespace {
 struct ResponseContext {
 	std::string retryAfter;
 };
+
+#ifdef CURIER_ENABLE_TEST_HOOKS
+curier_internal::CurierHttpTransport testTransport;
+#endif
 
 esp_err_t handleHttpEvent(esp_http_client_event_t *event) {
 	if (event == nullptr || event->user_data == nullptr) {
@@ -58,6 +63,12 @@ CurierHttpResponse sendWebPushRequest(
     const std::string &jwt,
     const std::vector<uint8_t> &body
 ) {
+#ifdef CURIER_ENABLE_TEST_HOOKS
+	if (testTransport) {
+		return testTransport(config, subscription, jwt, body);
+	}
+#endif
+
 	CurierHttpResponse response;
 	if (subscription.endpoint.empty() || jwt.empty() || body.empty() ||
 	    body.size() > static_cast<size_t>(INT_MAX) ||
@@ -162,5 +173,15 @@ CurierHttpResponse sendWebPushRequest(
 	response.result.statusCode = statusCode;
 	return response;
 }
+
+#ifdef CURIER_ENABLE_TEST_HOOKS
+void setHttpTransportForTesting(CurierHttpTransport transport) {
+	testTransport = std::move(transport);
+}
+
+void clearHttpTransportForTesting() {
+	testTransport = CurierHttpTransport{};
+}
+#endif
 
 } // namespace curier_internal

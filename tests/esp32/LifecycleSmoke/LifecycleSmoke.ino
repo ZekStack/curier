@@ -1,8 +1,15 @@
 #include <Arduino.h>
 #include <Curier.h>
 
+extern "C" {
+#include "esp_heap_caps.h"
+}
+
 Curier curier;
 bool passed = true;
+
+constexpr size_t LifecycleCycles = 128;
+constexpr size_t HeapToleranceBytes = 512;
 
 void expect(bool condition, const char *message) {
 	if (!condition) {
@@ -11,7 +18,7 @@ void expect(bool condition, const char *message) {
 	}
 }
 
-CurierConfig testConfig() {
+CurierConfig testConfig(CurierStackType stackType) {
 	CurierConfig config;
 	config.vapidConfig.subject = "mailto:test@example.com";
 	config.vapidConfig.publicKeyBase64 =
@@ -19,10 +26,62 @@ CurierConfig testConfig() {
 	config.vapidConfig.privateKeyBase64 = "Qu8KQ-mRYC-ACZNsrftkSEaMv4qFAP9b-6Q7tK3lZX4";
 	config.queueSize = 2;
 	config.stackSize = 6144;
-	config.stackType = CurierStackType::Internal;
+	config.stackType = stackType;
 	config.retry.mode = CurierRetryMode::Disabled;
 	return config;
 }
+
+bool runLifecycleCycles(CurierStackType stackType, const char *label) {
+	CurierConfig config = testConfig(stackType);
+
+	// Warm up Mbed TLS and standard-library allocations before taking the baseline.
+	if (!curier.init(config) || !curier.end(5000)) {
+		Serial.printf("%s warm-up failed\n", label);
+		return false;
+	}
+
+	const size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+	const size_t psramBefore = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+	for (size_t cycle = 0; cycle < LifecycleCycles; ++cycle) {
+		CurierResult initialized = curier.init(config);
+		if (!initialized) {
+			Serial.printf("%s init failed at cycle %u: %s\n", label, cycle, initialized.message);
+			return false;
+		}
+		CurierResult stopped = curier.end(5000);
+		if (!stopped) {
+			Serial.printf("%s end failed at cycle %u: %s\n", label, cycle, stopped.message);
+			return false;
+		}
+		if (curier.initialized()) {
+			Serial.printf("%s remained initialized at cycle %u\n", label, cycle);
+			return false;
+		}
+	}
+
+	const size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+	const size_t psramAfter = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	Serial.printf(
+	    "%s lifecycle: internal %u -> %u, psram %u -> %u\n",
+	    label,
+	    internalBefore,
+	    internalAfter,
+	    psramBefore,
+	    psramAfter
+	);
+
+	if (internalAfter + HeapToleranceBytes < internalBefore) {
+		Serial.printf("%s leaked internal heap\n", label);
+		return false;
+	}
+	if (psramBefore > 0 && psramAfter + HeapToleranceBytes < psramBefore) {
+		Serial.printf("%s leaked PSRAM heap\n", label);
+		return false;
+	}
+	return true;
+}
+
 void setup() {
 	Serial.begin(115200);
 
@@ -32,7 +91,7 @@ void setup() {
 	});
 	expect(providerResult.result, "provider registration before init failed");
 
-	CurierResult initialized = curier.init(testConfig());
+	CurierResult initialized = curier.init(testConfig(CurierStackType::Internal));
 	expect(initialized.result, "initialization failed");
 	expect(curier.initialized(), "initialized state was not published");
 
@@ -61,9 +120,18 @@ void setup() {
 	expect(curier.end(5000).result, "shutdown failed");
 	expect(!curier.initialized(), "shutdown state was not published");
 
-	initialized = curier.init(testConfig());
-	expect(initialized.result, "reinitialization failed");
-	expect(curier.end(5000).result, "second shutdown failed");
+	expect(
+	    runLifecycleCycles(CurierStackType::Internal, "internal"),
+	    "internal lifecycle stress failed"
+	);
+	expect(runLifecycleCycles(CurierStackType::Auto, "auto"), "auto lifecycle stress failed");
+
+	if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+		expect(
+		    runLifecycleCycles(CurierStackType::Psram, "psram"),
+		    "PSRAM lifecycle stress failed"
+		);
+	}
 
 	Serial.println(passed ? "Curier lifecycle smoke passed" : "Curier lifecycle smoke failed");
 }

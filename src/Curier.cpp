@@ -10,6 +10,7 @@
 
 #include <array>
 #include <climits>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <new>
@@ -105,7 +106,7 @@ struct CurierImpl {
 	size_t inFlight = 0;
 
 	TaskHandle_t task = nullptr;
-	SemaphoreHandle_t doneSignal = nullptr;
+	SemaphoreHandle_t workerReadySignal = nullptr;
 	bool taskCreatedWithCaps = false;
 
 	std::unique_ptr<curier_internal::CurierCrypto> crypto;
@@ -211,7 +212,7 @@ struct CurierImpl {
 
 		CurierLock lock(mutex);
 		if (!lock) {
-			jwt.clear();
+			secureClear(jwt);
 			return CurierResult::failure(CurierStatus::InternalError, "Curier mutex lock failed");
 		}
 		CurierJwtCacheEntry *target = nullptr;
@@ -432,18 +433,20 @@ struct CurierImpl {
 			}
 		}
 
-		const bool withCaps = taskCreatedWithCaps;
 		{
 			CurierLock lock(mutex);
 			if (lock) {
 				diag.stackHighWaterMarkBytes = uxTaskGetStackHighWaterMark(nullptr);
-				task = nullptr;
 			}
 		}
-		if (doneSignal != nullptr) {
-			(void)xSemaphoreGive(doneSignal);
+		if (workerReadySignal != nullptr) {
+			(void)xSemaphoreGive(workerReadySignal);
 		}
-		curier_internal::task::deleteCurrent(withCaps);
+
+		// The owner deletes this suspended task with the matching allocation API.
+		// No CurierImpl state may be accessed after publishing workerReadySignal.
+		vTaskSuspend(nullptr);
+		std::abort();
 	}
 
 	static void taskEntry(void *argument) {
@@ -584,22 +587,17 @@ Curier::~Curier() {
 	if (!_impl) {
 		return;
 	}
-	bool onWorker = false;
 	TaskHandle_t worker = nullptr;
 	{
 		CurierLock lock(_impl->mutex);
 		if (lock) {
 			worker = _impl->task;
-			onWorker = worker != nullptr && xTaskGetCurrentTaskHandle() == worker;
-			if (onWorker) {
-				_impl->lifecycle = CurierLifecycle::Stopping;
-			}
 		}
 	}
-	if (onWorker) {
-		(void)xTaskNotify(worker, kNotificationStop, eSetBits);
-		(void)_impl.release();
-		return;
+	if (worker != nullptr && xTaskGetCurrentTaskHandle() == worker) {
+		// Destruction from a callback would invalidate the running member function.
+		// Fail deterministically instead of leaking CurierImpl or continuing with UAF.
+		std::abort();
 	}
 	while (true) {
 		CurierResult result = end(60000);
@@ -666,8 +664,8 @@ CurierResult Curier::init(const CurierConfig &config) {
 		    "Curier queue allocation failed"
 		);
 	}
-	_impl->doneSignal = xSemaphoreCreateBinary();
-	if (_impl->doneSignal == nullptr) {
+	_impl->workerReadySignal = xSemaphoreCreateBinary();
+	if (_impl->workerReadySignal == nullptr) {
 		delete[] _impl->queue;
 		_impl->queue = nullptr;
 		_impl->crypto.reset();
@@ -718,8 +716,8 @@ CurierResult Curier::init(const CurierConfig &config) {
 	if (created != pdPASS) {
 		_impl->task = nullptr;
 		_impl->lifecycle = CurierLifecycle::Uninitialized;
-		vSemaphoreDelete(_impl->doneSignal);
-		_impl->doneSignal = nullptr;
+		vSemaphoreDelete(_impl->workerReadySignal);
+		_impl->workerReadySignal = nullptr;
 		delete[] _impl->queue;
 		_impl->queue = nullptr;
 		_impl->crypto.reset();
@@ -747,7 +745,8 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 	}
 
 	TaskHandle_t worker = nullptr;
-	SemaphoreHandle_t done = nullptr;
+	SemaphoreHandle_t ready = nullptr;
+	bool createdWithCaps = false;
 	{
 		CurierLock lock(_impl->mutex);
 		if (!lock) {
@@ -764,22 +763,29 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 			);
 		}
 		_impl->lifecycle = CurierLifecycle::Stopping;
-		done = _impl->doneSignal;
+		ready = _impl->workerReadySignal;
+		createdWithCaps = _impl->taskCreatedWithCaps;
 	}
+
 	if (worker != nullptr) {
 		(void)xTaskNotify(worker, kNotificationStop, eSetBits);
 	}
-	if (done != nullptr && xSemaphoreTake(done, ticksForTimeout(timeoutMs)) != pdTRUE) {
+	if (ready != nullptr && xSemaphoreTake(ready, ticksForTimeout(timeoutMs)) != pdTRUE) {
 		return CurierResult::failure(CurierStatus::Timeout, "Curier shutdown timed out");
+	}
+
+	// The worker has published its final diagnostics and no longer accesses CurierImpl.
+	// Delete it from this owner task so normal and capability-created allocations are
+	// reclaimed before end() reports success.
+	if (worker != nullptr) {
+		curier_internal::task::destroy(worker, createdWithCaps);
 	}
 
 	CurierLock lock(_impl->mutex);
 	if (!lock) {
 		return CurierResult::failure(CurierStatus::InternalError, "Curier mutex lock failed");
 	}
-	if (_impl->task != nullptr) {
-		return CurierResult::failure(CurierStatus::Busy, "Curier worker is still running");
-	}
+	_impl->task = nullptr;
 	if (_impl->queue != nullptr) {
 		for (size_t index = 0; index < _impl->config.queueSize; ++index) {
 			if (_impl->queue[index] != nullptr) {
@@ -792,9 +798,9 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 		delete[] _impl->queue;
 		_impl->queue = nullptr;
 	}
-	if (_impl->doneSignal != nullptr) {
-		vSemaphoreDelete(_impl->doneSignal);
-		_impl->doneSignal = nullptr;
+	if (_impl->workerReadySignal != nullptr) {
+		vSemaphoreDelete(_impl->workerReadySignal);
+		_impl->workerReadySignal = nullptr;
 	}
 	_impl->crypto.reset();
 	_impl->clearConfigSecretsLocked();
@@ -986,7 +992,7 @@ CurierDiagnostics Curier::diagnostics() const {
 	CurierDiagnostics result = _impl->diag;
 	result.queueDepth = _impl->queueCount;
 	result.inFlight = _impl->inFlight;
-	if (_impl->task != nullptr) {
+	if (_impl->task != nullptr && _impl->lifecycle == CurierLifecycle::Running) {
 		result.stackHighWaterMarkBytes = uxTaskGetStackHighWaterMark(_impl->task);
 	}
 	return result;

@@ -30,6 +30,9 @@ void testEndpointOrigins() {
 	assert(curier_internal::endpointOrigin("https://push.example.com:8443/send", 2048, origin));
 	assert(origin == "https://push.example.com:8443");
 
+	assert(curier_internal::endpointOrigin("https://[2001:db8::1]/send", 2048, origin));
+	assert(origin == "https://[2001:db8::1]");
+
 	assert(curier_internal::endpointOrigin("https://[2001:db8::1]:8443/send", 2048, origin));
 	assert(origin == "https://[2001:db8::1]:8443");
 
@@ -38,6 +41,15 @@ void testEndpointOrigins() {
 	assert(!curier_internal::endpointOrigin("https://push.example.com/send#fragment", 2048, origin)
 	);
 	assert(!curier_internal::endpointOrigin("https://push.example.com/send", 8, origin));
+	assert(!curier_internal::endpointOrigin("https://push.example.com:443:8443/send", 2048, origin)
+	);
+	assert(!curier_internal::endpointOrigin("https://2001:db8::1/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://[2001:db8::1/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://[2001:db8::1]extra/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://push.example.com\\/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://push.example.com:/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://:443/send", 2048, origin));
+	assert(!curier_internal::endpointOrigin("https://push..example.com/send", 2048, origin));
 }
 
 void testRetryValidation() {

@@ -20,10 +20,22 @@ Curier uses checked non-throwing allocation for its implementation, queue, and
 job records, but toolchain standard-library allocation behavior still applies.
 User callbacks and time/retry providers must not throw exceptions.
 
-The VAPID private-key copy, cached JWTs, subscription auth secrets, and accepted
-plaintext payload buffers are overwritten before normal release. This reduces
-secret residue but does not replace whole-device heap, crash-dump, and physical
-security controls.
+The VAPID private-key copy, cached JWTs, subscription auth secrets, accepted
+plaintext payload buffers, deterministic crypto-test inputs, and intermediate
+key buffers are overwritten before normal release. This reduces secret residue
+but does not replace whole-device heap, crash-dump, and physical security
+controls.
+
+A successful `end()` deletes the worker from the owner task before freeing the
+queue, semaphore, cryptographic state, and configuration. Capability-created
+PSRAM tasks are deleted with `vTaskDeleteWithCaps`; normal tasks are deleted
+with `vTaskDelete`. This makes task stack and TCB reclamation part of the public
+shutdown completion boundary rather than deferred worker self-cleanup.
+
+`tests/esp32/LifecycleSmoke` repeatedly initializes and ends Curier with
+Internal, Auto, and PSRAM stack selection where available, then compares
+internal and external heap against a warmed baseline. Run this test on every
+production board because compile success cannot qualify allocator recovery.
 
 Use `CurierDiagnostics` to measure queue and stack pressure on each real target.
 Compile success does not qualify a stack size for live TLS, cryptography,

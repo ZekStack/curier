@@ -134,6 +134,238 @@ bool hkdfExpandSingleBlock(
 	return hmacSha256(prk, 32, input.data(), input.size(), output);
 }
 
+CurierResult encryptWithInputs(
+    mbedtls_ctr_drbg_context &random,
+    const std::string &plaintext,
+    const CurierSubscription &subscription,
+    const curier_internal::CurierEncryptionInputs &inputs,
+    std::vector<uint8_t> &body
+) {
+	body.clear();
+	if (plaintext.empty() || plaintext.size() > 3993) {
+		return CurierResult::failure(
+		    CurierStatus::PayloadTooLarge,
+		    "payload is empty or exceeds RFC 8291 limits"
+		);
+	}
+
+	std::vector<uint8_t> receiverPublic;
+	std::vector<uint8_t> authSecret;
+	if (!decodePublicKey(subscription.p256dh, receiverPublic) ||
+	    (subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
+	    !curier_internal::CurierCrypto::base64UrlDecode(subscription.auth, authSecret) ||
+	    authSecret.size() != kAuthSecretBytes) {
+		secureZero(authSecret.data(), authSecret.size());
+		return CurierResult::failure(
+		    CurierStatus::InvalidSubscription,
+		    "subscription encryption keys are invalid"
+		);
+	}
+
+	mbedtls_ecp_group group;
+	mbedtls_mpi senderPrivate;
+	mbedtls_mpi shared;
+	mbedtls_ecp_point senderPublicPoint;
+	mbedtls_ecp_point receiverPublicPoint;
+	mbedtls_ecp_group_init(&group);
+	mbedtls_mpi_init(&senderPrivate);
+	mbedtls_mpi_init(&shared);
+	mbedtls_ecp_point_init(&senderPublicPoint);
+	mbedtls_ecp_point_init(&receiverPublicPoint);
+
+	std::array<uint8_t, kP256PublicKeyBytes> senderPublic{};
+	std::array<uint8_t, kSharedSecretBytes> sharedSecret{};
+	std::array<uint8_t, 32> prkKey{};
+	std::array<uint8_t, 32> inputKeyMaterial{};
+	std::array<uint8_t, 32> prk{};
+	std::array<uint8_t, 32> contentKeyFull{};
+	std::array<uint8_t, 32> nonceFull{};
+	std::array<uint8_t, kContentKeyBytes> contentKey{};
+	std::array<uint8_t, kNonceBytes> nonce{};
+	bool success = false;
+	size_t senderPublicSize = 0;
+
+	do {
+		if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1) != 0 ||
+		    mbedtls_mpi_read_binary(
+		        &senderPrivate,
+		        inputs.senderPrivateKey.data(),
+		        inputs.senderPrivateKey.size()
+		    ) != 0 ||
+		    mbedtls_ecp_check_privkey(&group, &senderPrivate) != 0 ||
+		    mbedtls_ecp_mul(
+		        &group,
+		        &senderPublicPoint,
+		        &senderPrivate,
+		        &group.G,
+		        mbedtls_ctr_drbg_random,
+		        &random
+		    ) != 0 ||
+		    mbedtls_ecp_point_write_binary(
+		        &group,
+		        &senderPublicPoint,
+		        MBEDTLS_ECP_PF_UNCOMPRESSED,
+		        &senderPublicSize,
+		        senderPublic.data(),
+		        senderPublic.size()
+		    ) != 0 ||
+		    senderPublicSize != kP256PublicKeyBytes ||
+		    mbedtls_ecp_point_read_binary(
+		        &group,
+		        &receiverPublicPoint,
+		        receiverPublic.data(),
+		        receiverPublic.size()
+		    ) != 0 ||
+		    mbedtls_ecp_check_pubkey(&group, &receiverPublicPoint) != 0 ||
+		    mbedtls_ecdh_compute_shared(
+		        &group,
+		        &shared,
+		        &receiverPublicPoint,
+		        &senderPrivate,
+		        mbedtls_ctr_drbg_random,
+		        &random
+		    ) != 0 ||
+		    mbedtls_mpi_write_binary(&shared, sharedSecret.data(), sharedSecret.size()) != 0) {
+			break;
+		}
+
+		std::vector<uint8_t> keyInfo;
+		static constexpr char kWebPushInfo[] = "WebPush: info";
+		keyInfo.reserve(sizeof(kWebPushInfo) + receiverPublic.size() + senderPublic.size());
+		keyInfo.insert(keyInfo.end(), kWebPushInfo, kWebPushInfo + sizeof(kWebPushInfo) - 1);
+		keyInfo.push_back(0x00);
+		keyInfo.insert(keyInfo.end(), receiverPublic.begin(), receiverPublic.end());
+		keyInfo.insert(keyInfo.end(), senderPublic.begin(), senderPublic.end());
+		if (!hmacSha256(
+		        authSecret.data(),
+		        authSecret.size(),
+		        sharedSecret.data(),
+		        sharedSecret.size(),
+		        prkKey.data()
+		    ) ||
+		    !hkdfExpandSingleBlock(
+		        prkKey.data(),
+		        keyInfo.data(),
+		        keyInfo.size(),
+		        inputKeyMaterial.data()
+		    ) ||
+		    !hmacSha256(
+		        inputs.salt.data(),
+		        inputs.salt.size(),
+		        inputKeyMaterial.data(),
+		        inputKeyMaterial.size(),
+		        prk.data()
+		    )) {
+			break;
+		}
+
+		static constexpr char kContentKeyInfo[] = "Content-Encoding: aes128gcm";
+		static constexpr char kNonceInfo[] = "Content-Encoding: nonce";
+		std::vector<uint8_t> contentInfo(
+		    kContentKeyInfo,
+		    kContentKeyInfo + sizeof(kContentKeyInfo) - 1
+		);
+		contentInfo.push_back(0x00);
+		std::vector<uint8_t> nonceInfo(kNonceInfo, kNonceInfo + sizeof(kNonceInfo) - 1);
+		nonceInfo.push_back(0x00);
+		if (!hkdfExpandSingleBlock(
+		        prk.data(),
+		        contentInfo.data(),
+		        contentInfo.size(),
+		        contentKeyFull.data()
+		    ) ||
+		    !hkdfExpandSingleBlock(
+		        prk.data(),
+		        nonceInfo.data(),
+		        nonceInfo.size(),
+		        nonceFull.data()
+		    )) {
+			break;
+		}
+		std::copy_n(contentKeyFull.begin(), contentKey.size(), contentKey.begin());
+		std::copy_n(nonceFull.begin(), nonce.size(), nonce.begin());
+
+		std::vector<uint8_t> record(
+		    reinterpret_cast<const uint8_t *>(plaintext.data()),
+		    reinterpret_cast<const uint8_t *>(plaintext.data()) + plaintext.size()
+		);
+		record.push_back(0x02);
+		std::vector<uint8_t> ciphertext(record.size() + kGcmTagBytes);
+		size_t outputSize = 0;
+		size_t written = 0;
+		std::array<uint8_t, kGcmTagBytes> tag{};
+		mbedtls_cipher_context_t cipher;
+		mbedtls_cipher_init(&cipher);
+		const mbedtls_cipher_info_t *cipherInfo =
+		    mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_GCM);
+		const bool encrypted =
+		    cipherInfo != nullptr && mbedtls_cipher_setup(&cipher, cipherInfo) == 0 &&
+		    mbedtls_cipher_setkey(&cipher, contentKey.data(), 128, MBEDTLS_ENCRYPT) == 0 &&
+		    mbedtls_cipher_set_iv(&cipher, nonce.data(), nonce.size()) == 0 &&
+		    mbedtls_cipher_reset(&cipher) == 0 &&
+		    mbedtls_cipher_update_ad(&cipher, nullptr, 0) == 0 &&
+		    mbedtls_cipher_update(
+		        &cipher,
+		        record.data(),
+		        record.size(),
+		        ciphertext.data(),
+		        &written
+		    ) == 0;
+		if (encrypted) {
+			outputSize = written;
+			if (mbedtls_cipher_finish(&cipher, ciphertext.data() + outputSize, &written) != 0) {
+				mbedtls_cipher_free(&cipher);
+				secureZero(record.data(), record.size());
+				break;
+			}
+			outputSize += written;
+			if (mbedtls_cipher_write_tag(&cipher, tag.data(), tag.size()) != 0) {
+				mbedtls_cipher_free(&cipher);
+				secureZero(record.data(), record.size());
+				break;
+			}
+		}
+		mbedtls_cipher_free(&cipher);
+		secureZero(record.data(), record.size());
+		if (!encrypted) {
+			break;
+		}
+		ciphertext.resize(outputSize);
+		ciphertext.insert(ciphertext.end(), tag.begin(), tag.end());
+
+		body.reserve(inputs.salt.size() + 4 + 1 + senderPublic.size() + ciphertext.size());
+		body.insert(body.end(), inputs.salt.begin(), inputs.salt.end());
+		appendUint32(body, kRecordSize);
+		body.push_back(static_cast<uint8_t>(senderPublic.size()));
+		body.insert(body.end(), senderPublic.begin(), senderPublic.end());
+		body.insert(body.end(), ciphertext.begin(), ciphertext.end());
+		success = body.size() == plaintext.size() + 103;
+	} while (false);
+
+	mbedtls_ecp_point_free(&receiverPublicPoint);
+	mbedtls_ecp_point_free(&senderPublicPoint);
+	mbedtls_mpi_free(&shared);
+	mbedtls_mpi_free(&senderPrivate);
+	mbedtls_ecp_group_free(&group);
+	secureZero(authSecret.data(), authSecret.size());
+	secureZero(sharedSecret.data(), sharedSecret.size());
+	secureZero(prkKey.data(), prkKey.size());
+	secureZero(inputKeyMaterial.data(), inputKeyMaterial.size());
+	secureZero(prk.data(), prk.size());
+	secureZero(contentKeyFull.data(), contentKeyFull.size());
+	secureZero(nonceFull.data(), nonceFull.size());
+	secureZero(contentKey.data(), contentKey.size());
+	secureZero(nonce.data(), nonce.size());
+	if (!success) {
+		body.clear();
+		return CurierResult::failure(
+		    CurierStatus::CryptoError,
+		    "Web Push payload encryption failed"
+		);
+	}
+	return CurierResult::success();
+}
+
 } // namespace
 
 namespace curier_internal {
@@ -357,226 +589,67 @@ CurierResult CurierCrypto::validateVapid(const CurierVapid &vapid) {
 CurierResult CurierCrypto::encrypt(
     const std::string &plaintext, const CurierSubscription &subscription, std::vector<uint8_t> &body
 ) {
-	body.clear();
-	if (plaintext.empty() || plaintext.size() > 3993) {
-		return CurierResult::failure(
-		    CurierStatus::PayloadTooLarge,
-		    "payload is empty or exceeds RFC 8291 limits"
-		);
-	}
 	CurierResult initialized = init();
 	if (!initialized) {
 		return initialized;
 	}
-	std::vector<uint8_t> receiverPublic;
-	std::vector<uint8_t> authSecret;
-	if (!decodePublicKey(subscription.p256dh, receiverPublic) ||
-	    (subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
-	    !base64UrlDecode(subscription.auth, authSecret) || authSecret.size() != kAuthSecretBytes) {
-		secureZero(authSecret.data(), authSecret.size());
-		return CurierResult::failure(
-		    CurierStatus::InvalidSubscription,
-		    "subscription encryption keys are invalid"
-		);
-	}
 
+	CurierEncryptionInputs inputs;
 	mbedtls_ecp_group group;
-	mbedtls_mpi senderPrivate;
-	mbedtls_mpi shared;
-	mbedtls_ecp_point senderPublicPoint;
-	mbedtls_ecp_point receiverPublicPoint;
+	mbedtls_mpi privateKey;
+	mbedtls_ecp_point publicKey;
 	mbedtls_ecp_group_init(&group);
-	mbedtls_mpi_init(&senderPrivate);
-	mbedtls_mpi_init(&shared);
-	mbedtls_ecp_point_init(&senderPublicPoint);
-	mbedtls_ecp_point_init(&receiverPublicPoint);
-
-	std::array<uint8_t, kP256PublicKeyBytes> senderPublic{};
-	std::array<uint8_t, kSharedSecretBytes> sharedSecret{};
-	std::array<uint8_t, 32> prkKey{};
-	std::array<uint8_t, 32> inputKeyMaterial{};
-	std::array<uint8_t, kSaltBytes> salt{};
-	std::array<uint8_t, 32> prk{};
-	std::array<uint8_t, 32> contentKeyFull{};
-	std::array<uint8_t, 32> nonceFull{};
-	std::array<uint8_t, kContentKeyBytes> contentKey{};
-	std::array<uint8_t, kNonceBytes> nonce{};
-	bool success = false;
-	size_t senderPublicSize = 0;
-
+	mbedtls_mpi_init(&privateKey);
+	mbedtls_ecp_point_init(&publicKey);
+	bool generated = false;
 	do {
 		if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1) != 0 ||
 		    mbedtls_ecp_gen_keypair(
 		        &group,
-		        &senderPrivate,
-		        &senderPublicPoint,
+		        &privateKey,
+		        &publicKey,
 		        mbedtls_ctr_drbg_random,
 		        &_state->random
 		    ) != 0 ||
-		    mbedtls_ecp_point_write_binary(
-		        &group,
-		        &senderPublicPoint,
-		        MBEDTLS_ECP_PF_UNCOMPRESSED,
-		        &senderPublicSize,
-		        senderPublic.data(),
-		        senderPublic.size()
+		    mbedtls_mpi_write_binary(
+		        &privateKey,
+		        inputs.senderPrivateKey.data(),
+		        inputs.senderPrivateKey.size()
 		    ) != 0 ||
-		    senderPublicSize != kP256PublicKeyBytes ||
-		    mbedtls_ecp_point_read_binary(
-		        &group,
-		        &receiverPublicPoint,
-		        receiverPublic.data(),
-		        receiverPublic.size()
-		    ) != 0 ||
-		    mbedtls_ecp_check_pubkey(&group, &receiverPublicPoint) != 0 ||
-		    mbedtls_ecdh_compute_shared(
-		        &group,
-		        &shared,
-		        &receiverPublicPoint,
-		        &senderPrivate,
-		        mbedtls_ctr_drbg_random,
-		        &_state->random
-		    ) != 0 ||
-		    mbedtls_mpi_write_binary(&shared, sharedSecret.data(), sharedSecret.size()) != 0) {
+		    mbedtls_ctr_drbg_random(&_state->random, inputs.salt.data(), inputs.salt.size()) != 0) {
 			break;
 		}
-
-		std::vector<uint8_t> keyInfo;
-		static constexpr char kWebPushInfo[] = "WebPush: info";
-		keyInfo.reserve(sizeof(kWebPushInfo) + receiverPublic.size() + senderPublic.size());
-		keyInfo.insert(keyInfo.end(), kWebPushInfo, kWebPushInfo + sizeof(kWebPushInfo) - 1);
-		keyInfo.push_back(0x00);
-		keyInfo.insert(keyInfo.end(), receiverPublic.begin(), receiverPublic.end());
-		keyInfo.insert(keyInfo.end(), senderPublic.begin(), senderPublic.end());
-		if (!hmacSha256(
-		        authSecret.data(),
-		        authSecret.size(),
-		        sharedSecret.data(),
-		        sharedSecret.size(),
-		        prkKey.data()
-		    ) ||
-		    !hkdfExpandSingleBlock(
-		        prkKey.data(),
-		        keyInfo.data(),
-		        keyInfo.size(),
-		        inputKeyMaterial.data()
-		    ) ||
-		    mbedtls_ctr_drbg_random(&_state->random, salt.data(), salt.size()) != 0 ||
-		    !hmacSha256(
-		        salt.data(),
-		        salt.size(),
-		        inputKeyMaterial.data(),
-		        inputKeyMaterial.size(),
-		        prk.data()
-		    )) {
-			break;
-		}
-
-		static constexpr char kContentKeyInfo[] = "Content-Encoding: aes128gcm";
-		static constexpr char kNonceInfo[] = "Content-Encoding: nonce";
-		std::vector<uint8_t> contentInfo(
-		    kContentKeyInfo,
-		    kContentKeyInfo + sizeof(kContentKeyInfo) - 1
-		);
-		contentInfo.push_back(0x00);
-		std::vector<uint8_t> nonceInfo(kNonceInfo, kNonceInfo + sizeof(kNonceInfo) - 1);
-		nonceInfo.push_back(0x00);
-		if (!hkdfExpandSingleBlock(
-		        prk.data(),
-		        contentInfo.data(),
-		        contentInfo.size(),
-		        contentKeyFull.data()
-		    ) ||
-		    !hkdfExpandSingleBlock(
-		        prk.data(),
-		        nonceInfo.data(),
-		        nonceInfo.size(),
-		        nonceFull.data()
-		    )) {
-			break;
-		}
-		std::copy_n(contentKeyFull.begin(), contentKey.size(), contentKey.begin());
-		std::copy_n(nonceFull.begin(), nonce.size(), nonce.begin());
-
-		std::vector<uint8_t> record(
-		    reinterpret_cast<const uint8_t *>(plaintext.data()),
-		    reinterpret_cast<const uint8_t *>(plaintext.data()) + plaintext.size()
-		);
-		record.push_back(0x02);
-		std::vector<uint8_t> ciphertext(record.size() + kGcmTagBytes);
-		size_t outputSize = 0;
-		size_t written = 0;
-		std::array<uint8_t, kGcmTagBytes> tag{};
-		mbedtls_cipher_context_t cipher;
-		mbedtls_cipher_init(&cipher);
-		const mbedtls_cipher_info_t *cipherInfo =
-		    mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_GCM);
-		const bool encrypted =
-		    cipherInfo != nullptr && mbedtls_cipher_setup(&cipher, cipherInfo) == 0 &&
-		    mbedtls_cipher_setkey(&cipher, contentKey.data(), 128, MBEDTLS_ENCRYPT) == 0 &&
-		    mbedtls_cipher_set_iv(&cipher, nonce.data(), nonce.size()) == 0 &&
-		    mbedtls_cipher_reset(&cipher) == 0 &&
-		    mbedtls_cipher_update_ad(&cipher, nullptr, 0) == 0 &&
-		    mbedtls_cipher_update(
-		        &cipher,
-		        record.data(),
-		        record.size(),
-		        ciphertext.data(),
-		        &written
-		    ) == 0;
-		if (encrypted) {
-			outputSize = written;
-			if (mbedtls_cipher_finish(&cipher, ciphertext.data() + outputSize, &written) != 0) {
-				mbedtls_cipher_free(&cipher);
-				secureZero(record.data(), record.size());
-				break;
-			}
-			outputSize += written;
-			if (mbedtls_cipher_write_tag(&cipher, tag.data(), tag.size()) != 0) {
-				mbedtls_cipher_free(&cipher);
-				secureZero(record.data(), record.size());
-				break;
-			}
-		}
-		mbedtls_cipher_free(&cipher);
-		secureZero(record.data(), record.size());
-		if (!encrypted) {
-			break;
-		}
-		ciphertext.resize(outputSize);
-		ciphertext.insert(ciphertext.end(), tag.begin(), tag.end());
-
-		body.reserve(salt.size() + 4 + 1 + senderPublic.size() + ciphertext.size());
-		body.insert(body.end(), salt.begin(), salt.end());
-		appendUint32(body, kRecordSize);
-		body.push_back(static_cast<uint8_t>(senderPublic.size()));
-		body.insert(body.end(), senderPublic.begin(), senderPublic.end());
-		body.insert(body.end(), ciphertext.begin(), ciphertext.end());
-		success = body.size() == plaintext.size() + 103;
+		generated = true;
 	} while (false);
-
-	mbedtls_ecp_point_free(&receiverPublicPoint);
-	mbedtls_ecp_point_free(&senderPublicPoint);
-	mbedtls_mpi_free(&shared);
-	mbedtls_mpi_free(&senderPrivate);
+	mbedtls_ecp_point_free(&publicKey);
+	mbedtls_mpi_free(&privateKey);
 	mbedtls_ecp_group_free(&group);
-	secureZero(authSecret.data(), authSecret.size());
-	secureZero(sharedSecret.data(), sharedSecret.size());
-	secureZero(prkKey.data(), prkKey.size());
-	secureZero(inputKeyMaterial.data(), inputKeyMaterial.size());
-	secureZero(prk.data(), prk.size());
-	secureZero(contentKeyFull.data(), contentKeyFull.size());
-	secureZero(nonceFull.data(), nonceFull.size());
-	secureZero(contentKey.data(), contentKey.size());
-	secureZero(nonce.data(), nonce.size());
-	if (!success) {
-		body.clear();
+	if (!generated) {
+		secureZero(inputs.senderPrivateKey.data(), inputs.senderPrivateKey.size());
+		secureZero(inputs.salt.data(), inputs.salt.size());
 		return CurierResult::failure(
 		    CurierStatus::CryptoError,
-		    "Web Push payload encryption failed"
+		    "Web Push encryption inputs could not be generated"
 		);
 	}
-	return CurierResult::success();
+
+	CurierResult result = encryptWithInputs(_state->random, plaintext, subscription, inputs, body);
+	secureZero(inputs.senderPrivateKey.data(), inputs.senderPrivateKey.size());
+	secureZero(inputs.salt.data(), inputs.salt.size());
+	return result;
+}
+
+CurierResult CurierCrypto::encryptWithInputsForTesting(
+    const std::string &plaintext,
+    const CurierSubscription &subscription,
+    const CurierEncryptionInputs &inputs,
+    std::vector<uint8_t> &body
+) {
+	CurierResult initialized = init();
+	if (!initialized) {
+		return initialized;
+	}
+	return encryptWithInputs(_state->random, plaintext, subscription, inputs, body);
 }
 
 CurierResult CurierCrypto::createVapidJwt(
