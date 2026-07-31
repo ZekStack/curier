@@ -101,12 +101,8 @@ void testQueueBoundAndExactlyOnce() {
 	std::atomic<int> callbacks{0};
 
 	curier_internal::setHttpTransportForTesting(
-	    [entered, release](
-	        const CurierConfig &,
-	        const CurierSubscription &,
-	        const std::string &,
-	        const std::vector<uint8_t> &
-	    ) {
+	    [entered,
+	     release](const CurierConfig &, const CurierSubscription &, const std::string &, const std::vector<uint8_t> &) {
 		    xSemaphoreGive(entered);
 		    xSemaphoreTake(release, portMAX_DELAY);
 		    return httpSuccess();
@@ -146,11 +142,12 @@ void testCallbackRequeueAndBusyEnd() {
 	installClock(curier);
 	std::atomic<int> callbacks{0};
 	std::atomic<CurierStatus> callbackEndStatus{CurierStatus::InternalError};
-	curier_internal::setHttpTransportForTesting(
-	    [](const CurierConfig &, const CurierSubscription &, const std::string &, const std::vector<uint8_t> &) {
-		    return httpSuccess();
-	    }
-	);
+	curier_internal::setHttpTransportForTesting([](const CurierConfig &,
+	                                               const CurierSubscription &,
+	                                               const std::string &,
+	                                               const std::vector<uint8_t> &) {
+		return httpSuccess();
+	});
 
 	expectResult(curier.init(config(2)), "requeue test init failed");
 	const CurierResult firstQueued = curier.send(
@@ -172,7 +169,10 @@ void testCallbackRequeueAndBusyEnd() {
 	    }
 	);
 	expectResult(firstQueued, "requeue first send failed");
-	expect(waitUntil([&callbacks]() { return callbacks.load() == 2; }), "requeue callbacks timed out");
+	expect(
+	    waitUntil([&callbacks]() { return callbacks.load() == 2; }),
+	    "requeue callbacks timed out"
+	);
 	expect(callbackEndStatus.load() == CurierStatus::Busy, "callback end() did not return Busy");
 	expectResult(curier.end(5000), "requeue test shutdown failed");
 	curier_internal::clearHttpTransportForTesting();
@@ -186,12 +186,7 @@ void testRetryAndCancellation() {
 	CurierSendResult terminal;
 
 	curier_internal::setHttpTransportForTesting(
-	    [&attempts](
-	        const CurierConfig &,
-	        const CurierSubscription &,
-	        const std::string &,
-	        const std::vector<uint8_t> &
-	    ) {
+	    [&attempts](const CurierConfig &, const CurierSubscription &, const std::string &, const std::vector<uint8_t> &) {
 		    const int attempt = attempts.fetch_add(1) + 1;
 		    return attempt < 3 ? httpFailure(503) : httpSuccess();
 	    }
@@ -203,11 +198,14 @@ void testRetryAndCancellation() {
 	retryConfig.retry.maxDelayMs = 1;
 	retryConfig.retry.jitterPercent = 0;
 	expectResult(curier.init(retryConfig), "retry test init failed");
-	const CurierResult retryQueued =
-	    curier.send(subscription(), payload("retry"), [&callbacks, &terminal](CurierSendResult result) {
+	const CurierResult retryQueued = curier.send(
+	    subscription(),
+	    payload("retry"),
+	    [&callbacks, &terminal](CurierSendResult result) {
 		    terminal = result;
 		    callbacks.fetch_add(1);
-	    });
+	    }
+	);
 	expectResult(retryQueued, "retry send failed");
 	expect(waitUntil([&callbacks]() { return callbacks.load() == 1; }), "retry callback timed out");
 	expect(terminal.ok() && terminal.attempts == 3, "retry terminal result is incorrect");
@@ -218,12 +216,7 @@ void testRetryAndCancellation() {
 	callbacks.store(0);
 	terminal = CurierSendResult{};
 	curier_internal::setHttpTransportForTesting(
-	    [&attempts](
-	        const CurierConfig &,
-	        const CurierSubscription &,
-	        const std::string &,
-	        const std::vector<uint8_t> &
-	    ) {
+	    [&attempts](const CurierConfig &, const CurierSubscription &, const std::string &, const std::vector<uint8_t> &) {
 		    attempts.fetch_add(1);
 		    return httpFailure(503);
 	    }
@@ -231,13 +224,19 @@ void testRetryAndCancellation() {
 	retryConfig.retry.baseDelayMs = 60000;
 	retryConfig.retry.maxDelayMs = 60000;
 	expectResult(curier.init(retryConfig), "cancellation test init failed");
-	const CurierResult cancellationQueued =
-	    curier.send(subscription(), payload("cancel"), [&callbacks, &terminal](CurierSendResult result) {
+	const CurierResult cancellationQueued = curier.send(
+	    subscription(),
+	    payload("cancel"),
+	    [&callbacks, &terminal](CurierSendResult result) {
 		    terminal = result;
 		    callbacks.fetch_add(1);
-	    });
+	    }
+	);
 	expectResult(cancellationQueued, "cancellation send failed");
-	expect(waitUntil([&attempts]() { return attempts.load() == 1; }), "cancellation attempt timed out");
+	expect(
+	    waitUntil([&attempts]() { return attempts.load() == 1; }),
+	    "cancellation attempt timed out"
+	);
 	const uint32_t started = millis();
 	expectResult(curier.end(5000), "retry cancellation shutdown failed");
 	expect(millis() - started < 2000, "retry wait did not wake promptly for shutdown");
@@ -255,32 +254,40 @@ void testShutdownTimeoutRecovery() {
 	CurierSendResult terminal;
 
 	curier_internal::setHttpTransportForTesting(
-	    [entered, release](
-	        const CurierConfig &,
-	        const CurierSubscription &,
-	        const std::string &,
-	        const std::vector<uint8_t> &
-	    ) {
+	    [entered,
+	     release](const CurierConfig &, const CurierSubscription &, const std::string &, const std::vector<uint8_t> &) {
 		    xSemaphoreGive(entered);
 		    xSemaphoreTake(release, portMAX_DELAY);
 		    return httpSuccess();
 	    }
 	);
 	expectResult(curier.init(config()), "timeout test init failed");
-	const CurierResult timeoutQueued =
-	    curier.send(subscription(), payload("timeout"), [&callbacks, &terminal](CurierSendResult result) {
+	const CurierResult timeoutQueued = curier.send(
+	    subscription(),
+	    payload("timeout"),
+	    [&callbacks, &terminal](CurierSendResult result) {
 		    terminal = result;
 		    callbacks.fetch_add(1);
-	    });
+	    }
+	);
 	expectResult(timeoutQueued, "timeout send failed");
-	expect(xSemaphoreTake(entered, pdMS_TO_TICKS(5000)) == pdTRUE, "timeout transport did not start");
+	expect(
+	    xSemaphoreTake(entered, pdMS_TO_TICKS(5000)) == pdTRUE,
+	    "timeout transport did not start"
+	);
 	const CurierResult timedOut = curier.end(1);
-	expect(!timedOut && timedOut.status == CurierStatus::Timeout, "end() did not preserve timeout state");
+	expect(
+	    !timedOut && timedOut.status == CurierStatus::Timeout,
+	    "end() did not preserve timeout state"
+	);
 	expect(!curier.initialized(), "Stopping state was reported as initialized");
 	xSemaphoreGive(release);
 	expectResult(curier.end(5000), "second end() did not finish cleanup");
 	expect(callbacks.load() == 1, "timeout recovery callback was not exactly once");
-	expect(terminal.status == CurierStatus::Cancelled, "timeout recovery did not cancel active work");
+	expect(
+	    terminal.status == CurierStatus::Cancelled,
+	    "timeout recovery did not cancel active work"
+	);
 
 	vSemaphoreDelete(release);
 	vSemaphoreDelete(entered);
@@ -295,7 +302,9 @@ void setup() {
 	testCallbackRequeueAndBusyEnd();
 	testRetryAndCancellation();
 	testShutdownTimeoutRecovery();
-	Serial.println(passed.load() ? "Curier runtime semantics passed" : "Curier runtime semantics failed");
+	Serial.println(
+	    passed.load() ? "Curier runtime semantics passed" : "Curier runtime semantics failed"
+	);
 }
 
 void loop() {

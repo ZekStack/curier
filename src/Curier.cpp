@@ -300,7 +300,8 @@ struct CurierImpl {
 			} else {
 				CurierResult jwtResult = jwtForOrigin(job.origin, now, generation, jwt);
 				if (!jwtResult) {
-					current = sendResult(false, jwtResult.status, jwtResult.message, reportedAttempts);
+					current =
+					    sendResult(false, jwtResult.status, jwtResult.message, reportedAttempts);
 				} else {
 					if (encryptedBody.empty()) {
 						CurierResult encrypted =
@@ -356,7 +357,8 @@ struct CurierImpl {
 					decision.delayMs = config.retry.maxDelayMs;
 				}
 			} else {
-				decision = curier_internal::defaultRetryDecision(config.retry, context, esp_random());
+				decision =
+				    curier_internal::defaultRetryDecision(config.retry, context, esp_random());
 			}
 			if (!decision.retry) {
 				return current;
@@ -423,12 +425,8 @@ struct CurierImpl {
 			}
 
 			uint32_t notification = 0;
-			(void)xTaskNotifyWait(
-			    0,
-			    std::numeric_limits<uint32_t>::max(),
-			    &notification,
-			    portMAX_DELAY
-			);
+			(void
+			)xTaskNotifyWait(0, std::numeric_limits<uint32_t>::max(), &notification, portMAX_DELAY);
 			if ((notification & kNotificationStop) != 0U) {
 				cancelQueued();
 				break;

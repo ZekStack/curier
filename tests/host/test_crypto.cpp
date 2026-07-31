@@ -11,8 +11,8 @@
 #include <vector>
 
 extern "C" {
-#include "mbedtls/ecp.h"
 #include "mbedtls/ecdsa.h"
+#include "mbedtls/ecp.h"
 #include "mbedtls/md.h"
 }
 
@@ -96,7 +96,8 @@ void testRfc8291Vector() {
 	subscription.auth = "BTBZMqHH6r4Tts7J_aSIgg";
 
 	curier_internal::CurierEncryptionInputs inputs;
-	const std::vector<uint8_t> senderPrivate = decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw");
+	const std::vector<uint8_t> senderPrivate =
+	    decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw");
 	const std::vector<uint8_t> salt = decode("DGv6ra1nlYgDCS1FRnbzlw");
 	assert(senderPrivate.size() == inputs.senderPrivateKey.size());
 	assert(salt.size() == inputs.salt.size());
@@ -113,10 +114,9 @@ void testRfc8291Vector() {
 	assert(encrypted);
 	assert(body.size() == 145);
 
-	const std::string expected =
-	    "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml"
-	    "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT"
-	    "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN";
+	const std::string expected = "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml"
+	                             "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT"
+	                             "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN";
 	assert(encode(body) == expected);
 }
 
