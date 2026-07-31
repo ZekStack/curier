@@ -95,7 +95,7 @@ jobs:
           pio pkg install -g -l "bblanchon/ArduinoJson@7.0.0"
       - name: Build and run RFC 8291 and VAPID tests
         run: |
-          ARDUINOJSON_HEADER="$(find ~/.platformio -type f -name ArduinoJson.h | head -n 1)"
+          ARDUINOJSON_HEADER="$(find ~/.platformio -type f -path '*/ArduinoJson/src/ArduinoJson.h' | head -n 1)"
           test -n "$ARDUINOJSON_HEADER"
           ARDUINOJSON_INCLUDE="$(dirname "$ARDUINOJSON_HEADER")"
           g++ -std=c++20 -Wall -Wextra -pedantic \
