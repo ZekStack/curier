@@ -112,7 +112,8 @@ void testRfc8291Vector() {
 	    body
 	);
 	assert(encrypted);
-	assert(body.size() == 145);
+	// RFC 8291 errata 5230 corrects the example Content-Length from 145 to 144.
+	assert(body.size() == 144);
 
 	const std::string expected = "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml"
 	                             "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT"
