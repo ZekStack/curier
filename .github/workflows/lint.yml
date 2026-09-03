@@ -8,14 +8,14 @@ on:
 
 jobs:
   whitespace:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     steps:
       - uses: actions/checkout@v4
       - name: Check whitespace
         run: git diff --check HEAD
 
   metadata:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, zekstack-ci]
     steps:
       - uses: actions/checkout@v4
       - name: Parse library metadata
