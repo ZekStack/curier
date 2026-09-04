@@ -43,7 +43,7 @@ CurierConfig config(size_t queueSize = 2) {
 	value.vapidConfig.privateKeyBase64 = "Qu8KQ-mRYC-ACZNsrftkSEaMv4qFAP9b-6Q7tK3lZX4";
 	value.queueSize = queueSize;
 	value.stackSize = 8192;
-	value.stackType = CurierStackType::Internal;
+	value.memory.taskStack = Strata::Placement::Internal;
 	value.retry.mode = CurierRetryMode::Disabled;
 	return value;
 }
