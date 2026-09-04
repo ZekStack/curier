@@ -16,8 +16,8 @@ struct CurierEncryptionInputs {
 
 class CurierCrypto {
   public:
-	CurierCrypto();
-	~CurierCrypto();
+	explicit CurierCrypto(Strata::Placement placement = Strata::Placement::Default) noexcept;
+	~CurierCrypto() noexcept = default;
 
 	CurierCrypto(const CurierCrypto &) = delete;
 	CurierCrypto &operator=(const CurierCrypto &) = delete;
@@ -50,7 +50,8 @@ class CurierCrypto {
 
   private:
 	struct State;
-	State *_state = nullptr;
+	Strata::Placement _placement = Strata::Placement::Default;
+	Strata::UniquePtr<State> _state;
 };
 
 } // namespace curier_internal
