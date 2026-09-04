@@ -13,7 +13,8 @@ void setup() {
 
 	CurierConfig config;
 	config.vapidConfig = vapid;
-	config.stackType = CurierStackType::Auto;
+	config.memory.allocation = Strata::Placement::Default;
+	config.memory.taskStack = Strata::Placement::PreferExternal;
 	config.stackSize = 4096;
 	config.coreId = tskNO_AFFINITY;
 	config.queueSize = 16;
