@@ -1,10 +1,11 @@
 #pragma once
 
-#include "../Curier.h"
+#include "CurierMemory.h"
 
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace curier_internal {
@@ -23,13 +24,28 @@ class CurierCrypto {
 	CurierCrypto &operator=(const CurierCrypto &) = delete;
 
 	CurierResult init();
+
+	CurierResult validateVapid(CurierVapidView vapid);
 	CurierResult validateVapid(const CurierVapid &vapid);
+
+	CurierResult validateSubscription(CurierSubscriptionView subscription);
 	CurierResult validateSubscription(const CurierSubscription &subscription);
+
 	CurierResult encrypt(
-	    const std::string &plaintext,
-	    const CurierSubscription &subscription,
-	    std::vector<uint8_t> &body
+	    std::string_view plaintext,
+	    CurierSubscriptionView subscription,
+	    CurierBytes &body
 	);
+
+	CurierResult createVapidJwt(
+	    CurierVapidView vapid,
+	    std::string_view audience,
+	    uint64_t nowEpochSeconds,
+	    uint32_t lifetimeSeconds,
+	    CurierString &jwt,
+	    uint64_t &expiresAt
+	);
+
 	CurierResult encryptWithInputsForTesting(
 	    const std::string &plaintext,
 	    const CurierSubscription &subscription,
