@@ -2,23 +2,26 @@
 
 #include "internal/CurierCrypto.h"
 #include "internal/CurierHttp.h"
-#include "internal/CurierMutex.h"
 #include "internal/CurierPayload.h"
 #include "internal/CurierProtocol.h"
 #include "internal/CurierRetry.h"
-#include "internal/CurierTaskSupport.h"
+
+#include <strata/freertos/BinarySemaphore.h>
+#include <strata/freertos/Mutex.h>
+#include <strata/freertos/Task.h>
 
 #include <array>
 #include <climits>
 #include <cstdlib>
 #include <ctime>
 #include <limits>
+#include <memory>
 #include <new>
+#include <optional>
 #include <utility>
 
 extern "C" {
 #include "esp_system.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 }
 
@@ -32,6 +35,7 @@ constexpr size_t kJwtCacheSize = 4;
 constexpr uint32_t kMaxTtlSeconds = 2147483648U;
 constexpr uint8_t kMaxConfiguredRetries = 20;
 constexpr size_t kMaxQueueSize = 256;
+constexpr size_t kMinStackSizeBytes = 1024;
 
 enum class CurierLifecycle : uint8_t {
 	Uninitialized,
@@ -46,12 +50,39 @@ struct CurierJob {
 	CurierSendCallback callback;
 };
 
+using CurierJobPtr = Strata::UniquePtr<CurierJob>;
+using CurierJobQueue = Strata::Vector<CurierJobPtr>;
+
 struct CurierJwtCacheEntry {
 	std::string origin;
 	std::string token;
 	uint64_t expiresAt = 0;
 	uint32_t clockGeneration = 0;
 	uint32_t lastUsed = 0;
+};
+
+class CurierLock {
+  public:
+	explicit CurierLock(Strata::FreeRTOS::RecursiveMutex &mutex)
+	    : _mutex(mutex), _locked(mutex.lock()) {
+	}
+
+	~CurierLock() {
+		if (_locked) {
+			_mutex.unlock();
+		}
+	}
+
+	CurierLock(const CurierLock &) = delete;
+	CurierLock &operator=(const CurierLock &) = delete;
+
+	explicit operator bool() const {
+		return _locked;
+	}
+
+  private:
+	Strata::FreeRTOS::RecursiveMutex &_mutex;
+	bool _locked = false;
 };
 
 CurierSendResult
@@ -70,6 +101,10 @@ TickType_t ticksForTimeout(uint32_t timeoutMs) {
 	}
 	const TickType_t ticks = pdMS_TO_TICKS(timeoutMs);
 	return ticks == 0 ? 1 : ticks;
+}
+
+bool validStackSize(size_t stackBytes) {
+	return stackBytes >= kMinStackSizeBytes && (stackBytes % sizeof(StackType_t)) == 0;
 }
 
 void secureClear(std::string &value) {
@@ -91,23 +126,34 @@ struct SecureStringGuard {
 	std::string &value;
 };
 
+[[noreturn]] void suspendForever() {
+	vTaskSuspend(nullptr);
+	for (;;) {
+		vTaskDelay(portMAX_DELAY);
+	}
+}
+
 } // namespace
 
 struct CurierImpl {
-	CurierMutex mutex;
-	CurierMutex lifecycleMutex;
+	CurierImpl() noexcept
+	    : mutex(Strata::FreeRTOS::RecursiveMutex::create()),
+	      lifecycleMutex(Strata::FreeRTOS::RecursiveMutex::create()) {
+	}
+
+	Strata::FreeRTOS::RecursiveMutex mutex;
+	Strata::FreeRTOS::RecursiveMutex lifecycleMutex;
 	CurierConfig config;
 	CurierLifecycle lifecycle = CurierLifecycle::Uninitialized;
 
-	CurierJob **queue = nullptr;
+	std::optional<CurierJobQueue> queue;
 	size_t queueHead = 0;
 	size_t queueTail = 0;
 	size_t queueCount = 0;
 	size_t inFlight = 0;
 
-	TaskHandle_t task = nullptr;
-	SemaphoreHandle_t workerReadySignal = nullptr;
-	bool taskCreatedWithCaps = false;
+	Strata::FreeRTOS::Task task;
+	Strata::FreeRTOS::BinarySemaphore workerReadySignal;
 
 	std::unique_ptr<curier_internal::CurierCrypto> crypto;
 	CurierTimeProvider timeProvider;
@@ -144,13 +190,12 @@ struct CurierImpl {
 		return true;
 	}
 
-	CurierJob *popJob() {
+	CurierJobPtr popJob() {
 		CurierLock lock(mutex);
-		if (!lock || queue == nullptr || queueCount == 0) {
-			return nullptr;
+		if (!lock || !queue || queueCount == 0) {
+			return {};
 		}
-		CurierJob *job = queue[queueHead];
-		queue[queueHead] = nullptr;
+		CurierJobPtr job = std::move((*queue)[queueHead]);
 		queueHead = (queueHead + 1) % config.queueSize;
 		queueCount--;
 		diag.queueDepth = queueCount;
@@ -381,8 +426,8 @@ struct CurierImpl {
 		return sendResult(false, CurierStatus::InternalError, "retry loop exhausted");
 	}
 
-	void invokeAndRelease(CurierJob *job, CurierSendResult result) {
-		if (job == nullptr) {
+	void invokeAndRelease(CurierJobPtr job, CurierSendResult result) {
+		if (!job) {
 			return;
 		}
 		if (job->callback) {
@@ -390,14 +435,14 @@ struct CurierImpl {
 		}
 		secureClear(job->payload);
 		secureClear(job->subscription.auth);
-		delete job;
+		job.reset();
 		recordCompletion(result);
 	}
 
 	void cancelQueued() {
-		while (CurierJob *job = popJob()) {
+		while (CurierJobPtr job = popJob()) {
 			invokeAndRelease(
-			    job,
+			    std::move(job),
 			    sendResult(false, CurierStatus::Cancelled, "send cancelled during shutdown")
 			);
 		}
@@ -409,8 +454,8 @@ struct CurierImpl {
 				cancelQueued();
 				break;
 			}
-			CurierJob *job = popJob();
-			if (job != nullptr) {
+			CurierJobPtr job = popJob();
+			if (job) {
 				CurierSendResult result = process(*job);
 				if (stopping() && result.status != CurierStatus::Cancelled) {
 					result = sendResult(
@@ -420,7 +465,7 @@ struct CurierImpl {
 					    result.attempts
 					);
 				}
-				invokeAndRelease(job, result);
+				invokeAndRelease(std::move(job), result);
 				continue;
 			}
 
@@ -436,24 +481,20 @@ struct CurierImpl {
 		{
 			CurierLock lock(mutex);
 			if (lock) {
-				diag.stackHighWaterMarkBytes = uxTaskGetStackHighWaterMark(nullptr);
+				diag.stackHighWaterMarkBytes = task.stackHighWaterMarkBytes();
 			}
 		}
-		if (workerReadySignal != nullptr) {
-			(void)xSemaphoreGive(workerReadySignal);
-		}
+		(void)workerReadySignal.give();
 
-		// The owner deletes this suspended task with the matching allocation API.
+		// The owner resets the Strata task after this publication point.
 		// No CurierImpl state may be accessed after publishing workerReadySignal.
-		vTaskSuspend(nullptr);
-		std::abort();
+		suspendForever();
 	}
 
 	static void taskEntry(void *argument) {
 		auto *impl = static_cast<CurierImpl *>(argument);
 		if (impl == nullptr) {
-			vTaskDelete(nullptr);
-			return;
+			suspendForever();
 		}
 		impl->run();
 	}
@@ -474,6 +515,9 @@ struct CurierImpl {
 namespace {
 
 CurierResult validateConfig(const CurierConfig &config) {
+	if (!Strata::validMemoryPolicy(config.memory)) {
+		return CurierResult::failure(CurierStatus::InvalidConfig, "memory policy is invalid");
+	}
 	if (config.queueSize == 0 || config.queueSize > kMaxQueueSize) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidConfig,
@@ -489,7 +533,7 @@ CurierResult validateConfig(const CurierConfig &config) {
 	if (config.maxEndpointBytes < 9 || config.maxEndpointBytes > static_cast<size_t>(INT_MAX)) {
 		return CurierResult::failure(CurierStatus::InvalidConfig, "endpoint size limit is invalid");
 	}
-	if (!curier_internal::task::validStackSize(config.stackSize)) {
+	if (!validStackSize(config.stackSize)) {
 		return CurierResult::failure(CurierStatus::InvalidConfig, "task stack size is invalid");
 	}
 	if (config.priority >= configMAX_PRIORITIES) {
@@ -501,11 +545,6 @@ CurierResult validateConfig(const CurierConfig &config) {
 	if (config.coreId != tskNO_AFFINITY &&
 	    (config.coreId < 0 || config.coreId >= portNUM_PROCESSORS)) {
 		return CurierResult::failure(CurierStatus::InvalidConfig, "task core ID is invalid");
-	}
-	if (config.stackType != CurierStackType::Auto &&
-	    config.stackType != CurierStackType::Internal &&
-	    config.stackType != CurierStackType::Psram) {
-		return CurierResult::failure(CurierStatus::InvalidConfig, "task stack type is invalid");
 	}
 	if (config.taskName.empty() ||
 	    config.taskName.size() >= static_cast<size_t>(configMAX_TASK_NAME_LEN)) {
@@ -549,11 +588,12 @@ CurierResult enqueueLocked(
     CurierSendCallback callback,
     TaskHandle_t &taskToNotify
 ) {
-	if (impl.inFlight >= impl.config.queueSize || impl.queueCount >= impl.config.queueSize) {
+	if (impl.inFlight >= impl.config.queueSize || impl.queueCount >= impl.config.queueSize ||
+	    !impl.queue) {
 		return CurierResult::failure(CurierStatus::QueueFull, "Curier queue is full");
 	}
-	auto *job = new (std::nothrow) CurierJob();
-	if (job == nullptr) {
+	CurierJobPtr job = Strata::makeUnique<CurierJob>(impl.config.memory.allocation);
+	if (!job) {
 		return CurierResult::failure(
 		    CurierStatus::AllocationFailed,
 		    "Curier job allocation failed"
@@ -564,7 +604,7 @@ CurierResult enqueueLocked(
 	job->payload = std::move(payload);
 	job->callback = std::move(callback);
 
-	impl.queue[impl.queueTail] = job;
+	(*impl.queue)[impl.queueTail] = std::move(job);
 	impl.queueTail = (impl.queueTail + 1) % impl.config.queueSize;
 	impl.queueCount++;
 	impl.inFlight++;
@@ -574,13 +614,13 @@ CurierResult enqueueLocked(
 		impl.diag.queueHighWaterMark = impl.inFlight;
 	}
 	impl.diag.enqueued++;
-	taskToNotify = impl.task;
+	taskToNotify = impl.task.handle();
 	return CurierResult::success("send queued");
 }
 
 } // namespace
 
-Curier::Curier() : _impl(new(std::nothrow) CurierImpl()) {
+Curier::Curier() : _impl(Strata::makeUnique<CurierImpl>(Strata::Placement::Internal)) {
 }
 
 Curier::~Curier() {
@@ -591,7 +631,7 @@ Curier::~Curier() {
 	{
 		CurierLock lock(_impl->mutex);
 		if (lock) {
-			worker = _impl->task;
+			worker = _impl->task.handle();
 		}
 	}
 	if (worker != nullptr && xTaskGetCurrentTaskHandle() == worker) {
@@ -612,6 +652,12 @@ CurierResult Curier::init(const CurierConfig &config) {
 		return CurierResult::failure(
 		    CurierStatus::AllocationFailed,
 		    "Curier implementation allocation failed"
+		);
+	}
+	if (!_impl->mutex || !_impl->lifecycleMutex) {
+		return CurierResult::failure(
+		    CurierStatus::AllocationFailed,
+		    "Curier synchronization allocation failed"
 		);
 	}
 	CurierResult configResult = validateConfig(config);
@@ -655,19 +701,12 @@ CurierResult Curier::init(const CurierConfig &config) {
 		return cryptoResult;
 	}
 
-	_impl->queue = new (std::nothrow) CurierJob *[config.queueSize]();
-	if (_impl->queue == nullptr) {
-		_impl->crypto.reset();
-		_impl->clearConfigSecretsLocked();
-		return CurierResult::failure(
-		    CurierStatus::QueueCreateFailed,
-		    "Curier queue allocation failed"
-		);
-	}
-	_impl->workerReadySignal = xSemaphoreCreateBinary();
-	if (_impl->workerReadySignal == nullptr) {
-		delete[] _impl->queue;
-		_impl->queue = nullptr;
+	_impl->queue.reset();
+	_impl->queue.emplace(Strata::Allocator<CurierJobPtr>{config.memory.allocation});
+	_impl->queue->resize(config.queueSize);
+	_impl->workerReadySignal = Strata::FreeRTOS::BinarySemaphore::create();
+	if (!_impl->workerReadySignal) {
+		_impl->queue.reset();
 		_impl->crypto.reset();
 		_impl->clearConfigSecretsLocked();
 		return CurierResult::failure(
@@ -682,44 +721,27 @@ CurierResult Curier::init(const CurierConfig &config) {
 	_impl->inFlight = 0;
 	_impl->diag = CurierDiagnostics{};
 	_impl->diag.queueSize = config.queueSize;
-	_impl->diag.requestedStackType = config.stackType;
+	_impl->diag.allocationPlacement = config.memory.allocation;
+	_impl->diag.requestedStackPlacement = config.memory.taskStack;
+	_impl->diag.queueStoragePlacement = config.memory.allocation;
+	_impl->diag.queueStorageRegion =
+	    _impl->queue->empty() ? Strata::Region::Unknown : Strata::regionOf(_impl->queue->data());
+	_impl->diag.shutdownSignalControlRegion = _impl->workerReadySignal.controlRegion();
 	_impl->clearJwtCacheLocked();
 	_impl->lifecycle = CurierLifecycle::Running;
 
-	const bool wantsPsram = config.stackType == CurierStackType::Psram ||
-	                        (config.stackType == CurierStackType::Auto &&
-	                         curier_internal::task::externalStackSupported());
-	BaseType_t created = curier_internal::task::create(
-	    CurierImpl::taskEntry,
-	    config.taskName.c_str(),
-	    config.stackSize,
-	    _impl.get(),
-	    config.priority,
-	    &_impl->task,
-	    config.coreId,
-	    wantsPsram,
-	    _impl->taskCreatedWithCaps
-	);
-	if (created != pdPASS && config.stackType == CurierStackType::Auto && wantsPsram) {
-		created = curier_internal::task::create(
-		    CurierImpl::taskEntry,
-		    config.taskName.c_str(),
-		    config.stackSize,
-		    _impl.get(),
-		    config.priority,
-		    &_impl->task,
-		    config.coreId,
-		    false,
-		    _impl->taskCreatedWithCaps
-		);
-	}
-	if (created != pdPASS) {
-		_impl->task = nullptr;
+	Strata::FreeRTOS::TaskConfig taskConfig{
+	    .name = _impl->config.taskName.c_str(),
+	    .stackBytes = config.stackSize,
+	    .stackPlacement = config.memory.taskStack,
+	    .priority = config.priority,
+	    .affinity = config.coreId,
+	};
+	_impl->task = Strata::FreeRTOS::Task::create(CurierImpl::taskEntry, _impl.get(), taskConfig);
+	if (!_impl->task) {
 		_impl->lifecycle = CurierLifecycle::Uninitialized;
-		vSemaphoreDelete(_impl->workerReadySignal);
-		_impl->workerReadySignal = nullptr;
-		delete[] _impl->queue;
-		_impl->queue = nullptr;
+		_impl->workerReadySignal.reset();
+		_impl->queue.reset();
 		_impl->crypto.reset();
 		_impl->clearConfigSecretsLocked();
 		return CurierResult::failure(
@@ -727,8 +749,7 @@ CurierResult Curier::init(const CurierConfig &config) {
 		    "Curier worker task creation failed"
 		);
 	}
-	_impl->diag.actualStackType =
-	    _impl->taskCreatedWithCaps ? CurierStackType::Psram : CurierStackType::Internal;
+	_impl->diag.stackRegion = _impl->task.stackRegion();
 	return CurierResult::success("Curier initialized");
 }
 
@@ -745,8 +766,7 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 	}
 
 	TaskHandle_t worker = nullptr;
-	SemaphoreHandle_t ready = nullptr;
-	bool createdWithCaps = false;
+	bool hasReadySignal = false;
 	{
 		CurierLock lock(_impl->mutex);
 		if (!lock) {
@@ -755,7 +775,7 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 		if (_impl->lifecycle == CurierLifecycle::Uninitialized) {
 			return CurierResult::success("Curier is not initialized");
 		}
-		worker = _impl->task;
+		worker = _impl->task.handle();
 		if (worker != nullptr && xTaskGetCurrentTaskHandle() == worker) {
 			return CurierResult::failure(
 			    CurierStatus::Busy,
@@ -763,52 +783,44 @@ CurierResult Curier::end(uint32_t timeoutMs) {
 			);
 		}
 		_impl->lifecycle = CurierLifecycle::Stopping;
-		ready = _impl->workerReadySignal;
-		createdWithCaps = _impl->taskCreatedWithCaps;
+		hasReadySignal = static_cast<bool>(_impl->workerReadySignal);
 	}
 
 	if (worker != nullptr) {
 		(void)xTaskNotify(worker, kNotificationStop, eSetBits);
 	}
-	if (ready != nullptr && xSemaphoreTake(ready, ticksForTimeout(timeoutMs)) != pdTRUE) {
+	if (hasReadySignal && !_impl->workerReadySignal.take(ticksForTimeout(timeoutMs))) {
 		return CurierResult::failure(CurierStatus::Timeout, "Curier shutdown timed out");
 	}
 
 	// The worker has published its final diagnostics and no longer accesses CurierImpl.
-	// Delete it from this owner task so normal and capability-created allocations are
-	// reclaimed before end() reports success.
+	// Reset the Strata task from this owner task so stack and TCB storage are reclaimed
+	// before end() reports success.
 	if (worker != nullptr) {
-		curier_internal::task::destroy(worker, createdWithCaps);
+		_impl->task.reset();
 	}
 
 	CurierLock lock(_impl->mutex);
 	if (!lock) {
 		return CurierResult::failure(CurierStatus::InternalError, "Curier mutex lock failed");
 	}
-	_impl->task = nullptr;
-	if (_impl->queue != nullptr) {
-		for (size_t index = 0; index < _impl->config.queueSize; ++index) {
-			if (_impl->queue[index] != nullptr) {
-				secureClear(_impl->queue[index]->payload);
-				secureClear(_impl->queue[index]->subscription.auth);
+	if (_impl->queue) {
+		for (CurierJobPtr &job : *_impl->queue) {
+			if (job) {
+				secureClear(job->payload);
+				secureClear(job->subscription.auth);
+				job.reset();
 			}
-			delete _impl->queue[index];
-			_impl->queue[index] = nullptr;
 		}
-		delete[] _impl->queue;
-		_impl->queue = nullptr;
+		_impl->queue.reset();
 	}
-	if (_impl->workerReadySignal != nullptr) {
-		vSemaphoreDelete(_impl->workerReadySignal);
-		_impl->workerReadySignal = nullptr;
-	}
+	_impl->workerReadySignal.reset();
 	_impl->crypto.reset();
 	_impl->clearConfigSecretsLocked();
 	_impl->queueHead = 0;
 	_impl->queueTail = 0;
 	_impl->queueCount = 0;
 	_impl->inFlight = 0;
-	_impl->taskCreatedWithCaps = false;
 	_impl->clearJwtCacheLocked();
 	_impl->lifecycle = CurierLifecycle::Uninitialized;
 	return CurierResult::success("Curier stopped");
@@ -843,8 +855,7 @@ CurierResult Curier::send(
 		if (_impl->lifecycle == CurierLifecycle::Stopping) {
 			return CurierResult::failure(CurierStatus::Stopping, "Curier is stopping");
 		}
-		if (_impl->lifecycle != CurierLifecycle::Running || !_impl->crypto ||
-		    _impl->queue == nullptr) {
+		if (_impl->lifecycle != CurierLifecycle::Running || !_impl->crypto || !_impl->queue) {
 			return CurierResult::failure(CurierStatus::NotInitialized, "Curier is not initialized");
 		}
 		std::string serialized;
@@ -900,8 +911,7 @@ CurierResult Curier::send(
 		if (_impl->lifecycle == CurierLifecycle::Stopping) {
 			return CurierResult::failure(CurierStatus::Stopping, "Curier is stopping");
 		}
-		if (_impl->lifecycle != CurierLifecycle::Running || !_impl->crypto ||
-		    _impl->queue == nullptr) {
+		if (_impl->lifecycle != CurierLifecycle::Running || !_impl->crypto || !_impl->queue) {
 			return CurierResult::failure(CurierStatus::NotInitialized, "Curier is not initialized");
 		}
 		std::string serialized;
@@ -992,8 +1002,9 @@ CurierDiagnostics Curier::diagnostics() const {
 	CurierDiagnostics result = _impl->diag;
 	result.queueDepth = _impl->queueCount;
 	result.inFlight = _impl->inFlight;
-	if (_impl->task != nullptr && _impl->lifecycle == CurierLifecycle::Running) {
-		result.stackHighWaterMarkBytes = uxTaskGetStackHighWaterMark(_impl->task);
+	if (_impl->task && _impl->lifecycle == CurierLifecycle::Running) {
+		result.stackHighWaterMarkBytes = _impl->task.stackHighWaterMarkBytes();
+		result.stackRegion = _impl->task.stackRegion();
 	}
 	return result;
 }
