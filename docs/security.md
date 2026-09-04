@@ -7,9 +7,20 @@ Provision it as a secret, avoid logging it, and do not commit production values.
 
 Curier validates the public/private relationship during initialization.
 Temporary private-key, ECDH, HKDF, AES, nonce, and signature buffers are
-explicitly zeroed before release. Standard-library capacity and allocator
-behavior can still leave copies outside Curier's direct control, so the ESP32
-heap and crash dumps remain part of the device trust boundary.
+explicitly zeroed before release. Curier also clears copied VAPID private-key
+storage, cached JWTs, accepted plaintext payloads, and copied subscription auth
+secrets during their normal release paths.
+
+Curier `v0.2.0` routes those Curier-owned buffers through
+`CurierConfig::memory.allocation`. If external placement is selected, sensitive
+runtime buffers may therefore reside in external RAM. The worker stack follows
+`memory.taskStack` and can also contain ephemeral cryptographic locals. Secure
+clearing remains active regardless of placement.
+
+Caller-created `std::string`, `JsonDocument`, and callback/provider captures are
+outside Curier's allocator boundary, as are allocations performed internally by
+Mbed TLS and ESP-IDF. Whole-device heap, PSRAM, crash dumps, and physical access
+remain part of the device trust boundary.
 
 The deterministic encryption test accepts explicit ephemeral inputs only through
 an internal API. Production sends still generate a fresh sender key and salt
