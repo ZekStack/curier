@@ -1,6 +1,7 @@
 #include "CurierCrypto.h"
 
 #include <ArduinoJson.h>
+#include <strata/arduinojson/Allocator.h>
 
 #include <algorithm>
 #include <array>
@@ -38,14 +39,30 @@ void secureZero(void *memory, size_t size) {
 	}
 }
 
-void appendUint32(std::vector<uint8_t> &output, uint32_t value) {
+template <typename String>
+void secureClear(String &value) {
+	if (!value.empty()) {
+		secureZero(value.data(), value.size());
+	}
+	value.clear();
+}
+
+curier_internal::CurierBytes makeBytes(Strata::Placement placement) {
+	return curier_internal::CurierBytes{Strata::Allocator<uint8_t>{placement}};
+}
+
+curier_internal::CurierString makeString(Strata::Placement placement) {
+	return curier_internal::CurierString{Strata::Allocator<char>{placement}};
+}
+
+void appendUint32(curier_internal::CurierBytes &output, uint32_t value) {
 	output.push_back(static_cast<uint8_t>((value >> 24U) & 0xffU));
 	output.push_back(static_cast<uint8_t>((value >> 16U) & 0xffU));
 	output.push_back(static_cast<uint8_t>((value >> 8U) & 0xffU));
 	output.push_back(static_cast<uint8_t>(value & 0xffU));
 }
 
-bool validBase64UrlShape(const std::string &input) {
+bool validBase64UrlShape(std::string_view input) {
 	if (input.empty()) {
 		return false;
 	}
@@ -77,19 +94,102 @@ bool validBase64UrlShape(const std::string &input) {
 	return input.size() % 4 != 1;
 }
 
-bool decodePublicKey(const std::string &encoded, std::vector<uint8_t> &key) {
+bool base64UrlDecode(
+    std::string_view input,
+    Strata::Placement placement,
+    curier_internal::CurierBytes &output
+) {
+	output.clear();
+	if (!validBase64UrlShape(input)) {
+		return false;
+	}
+	curier_internal::CurierString padded = makeString(placement);
+	padded.assign(input.data(), input.size());
+	for (char &character : padded) {
+		if (character == '-') {
+			character = '+';
+		} else if (character == '_') {
+			character = '/';
+		}
+	}
+	while (padded.size() % 4 != 0) {
+		padded.push_back('=');
+	}
+
+	size_t required = 0;
+	const int probe = mbedtls_base64_decode(
+	    nullptr,
+	    0,
+	    &required,
+	    reinterpret_cast<const uint8_t *>(padded.data()),
+	    padded.size()
+	);
+	if (probe != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL && probe != 0) {
+		return false;
+	}
+	output.assign(required, 0);
+	size_t written = 0;
+	const int decoded = mbedtls_base64_decode(
+	    output.data(),
+	    output.size(),
+	    &written,
+	    reinterpret_cast<const uint8_t *>(padded.data()),
+	    padded.size()
+	);
+	if (decoded != 0) {
+		output.clear();
+		return false;
+	}
+	output.resize(written);
+	return true;
+}
+
+bool base64UrlEncode(
+    const uint8_t *input,
+    size_t inputSize,
+    Strata::Placement placement,
+    curier_internal::CurierString &output
+) {
+	output.clear();
+	if (input == nullptr || inputSize == 0 ||
+	    inputSize > (std::numeric_limits<size_t>::max() - 4) / 4 * 3) {
+		return false;
+	}
+	curier_internal::CurierBytes encoded = makeBytes(placement);
+	encoded.resize(4 * ((inputSize + 2) / 3) + 4);
+	size_t written = 0;
+	if (mbedtls_base64_encode(encoded.data(), encoded.size(), &written, input, inputSize) != 0) {
+		return false;
+	}
+	output.assign(reinterpret_cast<const char *>(encoded.data()), written);
+	std::replace(output.begin(), output.end(), '+', '-');
+	std::replace(output.begin(), output.end(), '/', '_');
+	while (!output.empty() && output.back() == '=') {
+		output.pop_back();
+	}
+	return !output.empty();
+}
+
+bool decodePublicKey(
+    std::string_view encoded,
+    Strata::Placement placement,
+    curier_internal::CurierBytes &key
+) {
 	return (encoded.size() == 87 || encoded.size() == 88) &&
-	       curier_internal::CurierCrypto::base64UrlDecode(encoded, key) &&
-	       key.size() == kP256PublicKeyBytes && key[0] == 0x04;
+	       base64UrlDecode(encoded, placement, key) && key.size() == kP256PublicKeyBytes &&
+	       key[0] == 0x04;
 }
 
-bool decodePrivateKey(const std::string &encoded, std::vector<uint8_t> &key) {
+bool decodePrivateKey(
+    std::string_view encoded,
+    Strata::Placement placement,
+    curier_internal::CurierBytes &key
+) {
 	return (encoded.size() == 43 || encoded.size() == 44) &&
-	       curier_internal::CurierCrypto::base64UrlDecode(encoded, key) &&
-	       key.size() == kP256PrivateKeyBytes;
+	       base64UrlDecode(encoded, placement, key) && key.size() == kP256PrivateKeyBytes;
 }
 
-bool validVapidSubject(const std::string &subject) {
+bool validVapidSubject(std::string_view subject) {
 	if (subject.empty() || subject.size() > kMaxVapidSubjectBytes) {
 		return false;
 	}
@@ -102,7 +202,7 @@ bool validVapidSubject(const std::string &subject) {
 	if (https) {
 		const size_t authorityStart = sizeof("https://") - 1;
 		const size_t authorityEnd = subject.find_first_of("/?#", authorityStart);
-		const size_t end = authorityEnd == std::string::npos ? subject.size() : authorityEnd;
+		const size_t end = authorityEnd == std::string_view::npos ? subject.size() : authorityEnd;
 		if (end == authorityStart || subject.find('@', authorityStart) < end) {
 			return false;
 		}
@@ -124,21 +224,48 @@ bool hmacSha256(
 }
 
 bool hkdfExpandSingleBlock(
-    const uint8_t prk[32], const uint8_t *info, size_t infoSize, uint8_t output[32]
+    const uint8_t prk[32],
+    const uint8_t *info,
+    size_t infoSize,
+    Strata::Placement placement,
+    uint8_t output[32]
 ) {
-	std::vector<uint8_t> input;
+	curier_internal::CurierBytes input = makeBytes(placement);
 	input.reserve(infoSize + 1);
 	input.insert(input.end(), info, info + infoSize);
 	input.push_back(0x01);
 	return hmacSha256(prk, 32, input.data(), input.size(), output);
 }
 
+class CurierStringWriter {
+  public:
+	explicit CurierStringWriter(curier_internal::CurierString &target) : _target(target) {
+	}
+
+	size_t write(uint8_t value) {
+		_target.push_back(static_cast<char>(value));
+		return 1;
+	}
+
+	size_t write(const uint8_t *buffer, size_t size) {
+		if (buffer == nullptr || size == 0) {
+			return 0;
+		}
+		_target.append(reinterpret_cast<const char *>(buffer), size);
+		return size;
+	}
+
+  private:
+	curier_internal::CurierString &_target;
+};
+
 CurierResult encryptWithInputs(
     mbedtls_ctr_drbg_context &random,
-    const std::string &plaintext,
-    const CurierSubscription &subscription,
+    Strata::Placement placement,
+    std::string_view plaintext,
+    curier_internal::CurierSubscriptionView subscription,
     const curier_internal::CurierEncryptionInputs &inputs,
-    std::vector<uint8_t> &body
+    curier_internal::CurierBytes &body
 ) {
 	body.clear();
 	if (plaintext.empty() || plaintext.size() > 3993) {
@@ -148,11 +275,11 @@ CurierResult encryptWithInputs(
 		);
 	}
 
-	std::vector<uint8_t> receiverPublic;
-	std::vector<uint8_t> authSecret;
-	if (!decodePublicKey(subscription.p256dh, receiverPublic) ||
+	curier_internal::CurierBytes receiverPublic = makeBytes(placement);
+	curier_internal::CurierBytes authSecret = makeBytes(placement);
+	if (!decodePublicKey(subscription.p256dh, placement, receiverPublic) ||
 	    (subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
-	    !curier_internal::CurierCrypto::base64UrlDecode(subscription.auth, authSecret) ||
+	    !base64UrlDecode(subscription.auth, placement, authSecret) ||
 	    authSecret.size() != kAuthSecretBytes) {
 		secureZero(authSecret.data(), authSecret.size());
 		return CurierResult::failure(
@@ -228,7 +355,7 @@ CurierResult encryptWithInputs(
 			break;
 		}
 
-		std::vector<uint8_t> keyInfo;
+		curier_internal::CurierBytes keyInfo = makeBytes(placement);
 		static constexpr char kWebPushInfo[] = "WebPush: info";
 		keyInfo.reserve(sizeof(kWebPushInfo) + receiverPublic.size() + senderPublic.size());
 		keyInfo.insert(keyInfo.end(), kWebPushInfo, kWebPushInfo + sizeof(kWebPushInfo) - 1);
@@ -246,6 +373,7 @@ CurierResult encryptWithInputs(
 		        prkKey.data(),
 		        keyInfo.data(),
 		        keyInfo.size(),
+		        placement,
 		        inputKeyMaterial.data()
 		    ) ||
 		    !hmacSha256(
@@ -260,23 +388,26 @@ CurierResult encryptWithInputs(
 
 		static constexpr char kContentKeyInfo[] = "Content-Encoding: aes128gcm";
 		static constexpr char kNonceInfo[] = "Content-Encoding: nonce";
-		std::vector<uint8_t> contentInfo(
-		    kContentKeyInfo,
-		    kContentKeyInfo + sizeof(kContentKeyInfo) - 1
+		curier_internal::CurierBytes contentInfo = makeBytes(placement);
+		contentInfo.insert(
+		    contentInfo.end(), kContentKeyInfo, kContentKeyInfo + sizeof(kContentKeyInfo) - 1
 		);
 		contentInfo.push_back(0x00);
-		std::vector<uint8_t> nonceInfo(kNonceInfo, kNonceInfo + sizeof(kNonceInfo) - 1);
+		curier_internal::CurierBytes nonceInfo = makeBytes(placement);
+		nonceInfo.insert(nonceInfo.end(), kNonceInfo, kNonceInfo + sizeof(kNonceInfo) - 1);
 		nonceInfo.push_back(0x00);
 		if (!hkdfExpandSingleBlock(
 		        prk.data(),
 		        contentInfo.data(),
 		        contentInfo.size(),
+		        placement,
 		        contentKeyFull.data()
 		    ) ||
 		    !hkdfExpandSingleBlock(
 		        prk.data(),
 		        nonceInfo.data(),
 		        nonceInfo.size(),
+		        placement,
 		        nonceFull.data()
 		    )) {
 			break;
@@ -284,12 +415,15 @@ CurierResult encryptWithInputs(
 		std::copy_n(contentKeyFull.begin(), contentKey.size(), contentKey.begin());
 		std::copy_n(nonceFull.begin(), nonce.size(), nonce.begin());
 
-		std::vector<uint8_t> record(
+		curier_internal::CurierBytes record = makeBytes(placement);
+		record.insert(
+		    record.end(),
 		    reinterpret_cast<const uint8_t *>(plaintext.data()),
 		    reinterpret_cast<const uint8_t *>(plaintext.data()) + plaintext.size()
 		);
 		record.push_back(0x02);
-		std::vector<uint8_t> ciphertext(record.size() + kGcmTagBytes);
+		curier_internal::CurierBytes ciphertext = makeBytes(placement);
+		ciphertext.resize(record.size() + kGcmTagBytes);
 		size_t outputSize = 0;
 		size_t written = 0;
 		std::array<uint8_t, kGcmTagBytes> tag{};
@@ -419,88 +553,24 @@ CurierResult CurierCrypto::init() {
 	return CurierResult::success();
 }
 
-bool CurierCrypto::base64UrlDecode(const std::string &input, std::vector<uint8_t> &output) {
-	output.clear();
-	if (!validBase64UrlShape(input)) {
-		return false;
-	}
-	std::string padded = input;
-	for (char &character : padded) {
-		if (character == '-') {
-			character = '+';
-		} else if (character == '_') {
-			character = '/';
-		}
-	}
-	while (padded.size() % 4 != 0) {
-		padded.push_back('=');
-	}
-
-	size_t required = 0;
-	const int probe = mbedtls_base64_decode(
-	    nullptr,
-	    0,
-	    &required,
-	    reinterpret_cast<const uint8_t *>(padded.data()),
-	    padded.size()
-	);
-	if (probe != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL && probe != 0) {
-		return false;
-	}
-	output.assign(required, 0);
-	size_t written = 0;
-	const int decoded = mbedtls_base64_decode(
-	    output.data(),
-	    output.size(),
-	    &written,
-	    reinterpret_cast<const uint8_t *>(padded.data()),
-	    padded.size()
-	);
-	if (decoded != 0) {
-		output.clear();
-		return false;
-	}
-	output.resize(written);
-	return true;
-}
-
-bool CurierCrypto::base64UrlEncode(const uint8_t *input, size_t inputSize, std::string &output) {
-	output.clear();
-	if (input == nullptr || inputSize == 0 ||
-	    inputSize > (std::numeric_limits<size_t>::max() - 4) / 4 * 3) {
-		return false;
-	}
-	std::vector<uint8_t> encoded(4 * ((inputSize + 2) / 3) + 4);
-	size_t written = 0;
-	if (mbedtls_base64_encode(encoded.data(), encoded.size(), &written, input, inputSize) != 0) {
-		return false;
-	}
-	output.assign(reinterpret_cast<const char *>(encoded.data()), written);
-	std::replace(output.begin(), output.end(), '+', '-');
-	std::replace(output.begin(), output.end(), '/', '_');
-	while (!output.empty() && output.back() == '=') {
-		output.pop_back();
-	}
-	return !output.empty();
-}
-
-CurierResult CurierCrypto::validateSubscription(const CurierSubscription &subscription) {
+CurierResult CurierCrypto::validateSubscription(CurierSubscriptionView subscription) {
 	if (subscription.endpoint.empty() || subscription.p256dh.empty() || subscription.auth.empty()) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidSubscription,
 		    "subscription endpoint and keys are required"
 		);
 	}
-	std::vector<uint8_t> publicKey;
-	if (!decodePublicKey(subscription.p256dh, publicKey)) {
+	CurierBytes publicKey = makeBytes(_placement);
+	if (!decodePublicKey(subscription.p256dh, _placement, publicKey)) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidSubscription,
 		    "subscription p256dh key is invalid"
 		);
 	}
-	std::vector<uint8_t> authSecret;
+	CurierBytes authSecret = makeBytes(_placement);
 	if ((subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
-	    !base64UrlDecode(subscription.auth, authSecret) || authSecret.size() != kAuthSecretBytes) {
+	    !base64UrlDecode(subscription.auth, _placement, authSecret) ||
+	    authSecret.size() != kAuthSecretBytes) {
 		secureZero(authSecret.data(), authSecret.size());
 		return CurierResult::failure(
 		    CurierStatus::InvalidSubscription,
@@ -511,17 +581,25 @@ CurierResult CurierCrypto::validateSubscription(const CurierSubscription &subscr
 	return CurierResult::success();
 }
 
-CurierResult CurierCrypto::validateVapid(const CurierVapid &vapid) {
+CurierResult CurierCrypto::validateSubscription(const CurierSubscription &subscription) {
+	return validateSubscription(CurierSubscriptionView{
+	    subscription.endpoint,
+	    subscription.p256dh,
+	    subscription.auth,
+	});
+}
+
+CurierResult CurierCrypto::validateVapid(CurierVapidView vapid) {
 	if (!validVapidSubject(vapid.subject)) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidVapidSubject,
 		    "VAPID subject must be a bounded mailto or HTTPS URI"
 		);
 	}
-	std::vector<uint8_t> publicKey;
-	std::vector<uint8_t> privateKey;
-	if (!decodePublicKey(vapid.publicKeyBase64, publicKey) ||
-	    !decodePrivateKey(vapid.privateKeyBase64, privateKey)) {
+	CurierBytes publicKey = makeBytes(_placement);
+	CurierBytes privateKey = makeBytes(_placement);
+	if (!decodePublicKey(vapid.publicKeyBase64, _placement, publicKey) ||
+	    !decodePrivateKey(vapid.privateKeyBase64, _placement, privateKey)) {
 		secureZero(privateKey.data(), privateKey.size());
 		return CurierResult::failure(
 		    CurierStatus::InvalidVapidKey,
@@ -583,8 +661,16 @@ CurierResult CurierCrypto::validateVapid(const CurierVapid &vapid) {
 	return CurierResult::success();
 }
 
+CurierResult CurierCrypto::validateVapid(const CurierVapid &vapid) {
+	return validateVapid(CurierVapidView{
+	    vapid.subject,
+	    vapid.publicKeyBase64,
+	    vapid.privateKeyBase64,
+	});
+}
+
 CurierResult CurierCrypto::encrypt(
-    const std::string &plaintext, const CurierSubscription &subscription, std::vector<uint8_t> &body
+    std::string_view plaintext, CurierSubscriptionView subscription, CurierBytes &body
 ) {
 	CurierResult initialized = init();
 	if (!initialized) {
@@ -630,7 +716,8 @@ CurierResult CurierCrypto::encrypt(
 		);
 	}
 
-	CurierResult result = encryptWithInputs(_state->random, plaintext, subscription, inputs, body);
+	CurierResult result =
+	    ::encryptWithInputs(_state->random, _placement, plaintext, subscription, inputs, body);
 	secureZero(inputs.senderPrivateKey.data(), inputs.senderPrivateKey.size());
 	secureZero(inputs.salt.data(), inputs.salt.size());
 	return result;
@@ -646,15 +733,29 @@ CurierResult CurierCrypto::encryptWithInputsForTesting(
 	if (!initialized) {
 		return initialized;
 	}
-	return encryptWithInputs(_state->random, plaintext, subscription, inputs, body);
+	CurierBytes placedBody = makeBytes(_placement);
+	CurierResult result = ::encryptWithInputs(
+	    _state->random,
+	    _placement,
+	    plaintext,
+	    CurierSubscriptionView{subscription.endpoint, subscription.p256dh, subscription.auth},
+	    inputs,
+	    placedBody
+	);
+	if (result) {
+		body.assign(placedBody.begin(), placedBody.end());
+	} else {
+		body.clear();
+	}
+	return result;
 }
 
 CurierResult CurierCrypto::createVapidJwt(
-    const CurierVapid &vapid,
-    const std::string &audience,
+    CurierVapidView vapid,
+    std::string_view audience,
     uint64_t nowEpochSeconds,
     uint32_t lifetimeSeconds,
-    std::string &jwt,
+    CurierString &jwt,
     uint64_t &expiresAt
 ) {
 	jwt.clear();
@@ -670,8 +771,8 @@ CurierResult CurierCrypto::createVapidJwt(
 	if (!initialized) {
 		return initialized;
 	}
-	std::vector<uint8_t> privateKey;
-	if (!decodePrivateKey(vapid.privateKeyBase64, privateKey)) {
+	CurierBytes privateKey = makeBytes(_placement);
+	if (!decodePrivateKey(vapid.privateKeyBase64, _placement, privateKey)) {
 		return CurierResult::failure(CurierStatus::InvalidVapidKey, "VAPID private key is invalid");
 	}
 	expiresAt = nowEpochSeconds + lifetimeSeconds;
@@ -681,13 +782,24 @@ CurierResult CurierCrypto::createVapidJwt(
 		return CurierResult::failure(CurierStatus::JwtError, "VAPID JWT expiration overflow");
 	}
 
+	CurierString audienceText = makeString(_placement);
+	audienceText.assign(audience.data(), audience.size());
+	CurierString subjectText = makeString(_placement);
+	subjectText.assign(vapid.subject.data(), vapid.subject.size());
+
 	static constexpr char kHeader[] = R"({"alg":"ES256","typ":"JWT"})";
-	JsonDocument payload;
-	payload["aud"] = audience;
+	Strata::ArduinoJson::Allocator jsonAllocator{_placement};
+	JsonDocument payload{&jsonAllocator};
+	payload["aud"] = audienceText.c_str();
 	payload["exp"] = expiresAt;
-	payload["sub"] = vapid.subject;
-	std::string payloadJson;
-	if (serializeJson(payload, payloadJson) == 0) {
+	payload["sub"] = subjectText.c_str();
+	if (payload.overflowed()) {
+		secureZero(privateKey.data(), privateKey.size());
+		return CurierResult::failure(CurierStatus::AllocationFailed, "VAPID JWT JSON allocation failed");
+	}
+	CurierString payloadJson = makeString(_placement);
+	CurierStringWriter writer(payloadJson);
+	if (serializeJson(payload, writer) == 0) {
 		secureZero(privateKey.data(), privateKey.size());
 		return CurierResult::failure(
 		    CurierStatus::JwtError,
@@ -695,22 +807,29 @@ CurierResult CurierCrypto::createVapidJwt(
 		);
 	}
 
-	std::string encodedHeader;
-	std::string encodedPayload;
+	CurierString encodedHeader = makeString(_placement);
+	CurierString encodedPayload = makeString(_placement);
 	if (!base64UrlEncode(
 	        reinterpret_cast<const uint8_t *>(kHeader),
 	        sizeof(kHeader) - 1,
+	        _placement,
 	        encodedHeader
 	    ) ||
 	    !base64UrlEncode(
 	        reinterpret_cast<const uint8_t *>(payloadJson.data()),
 	        payloadJson.size(),
+	        _placement,
 	        encodedPayload
 	    )) {
 		secureZero(privateKey.data(), privateKey.size());
 		return CurierResult::failure(CurierStatus::JwtError, "VAPID JWT base64url encoding failed");
 	}
-	const std::string signingInput = encodedHeader + "." + encodedPayload;
+	CurierString signingInput = makeString(_placement);
+	signingInput.reserve(encodedHeader.size() + 1 + encodedPayload.size());
+	signingInput.append(encodedHeader);
+	signingInput.push_back('.');
+	signingInput.append(encodedPayload);
+
 	std::array<uint8_t, 32> hash{};
 	const mbedtls_md_info_t *hashInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
 	if (hashInfo == nullptr || mbedtls_md(
@@ -752,11 +871,16 @@ CurierResult CurierCrypto::createVapidJwt(
 		    mbedtls_mpi_write_binary(&signatureS, signature.data() + 32, 32) != 0) {
 			break;
 		}
-		std::string encodedSignature;
-		if (!base64UrlEncode(signature.data(), signature.size(), encodedSignature)) {
+		CurierString encodedSignature = makeString(_placement);
+		if (!base64UrlEncode(
+		        signature.data(), signature.size(), _placement, encodedSignature
+		    )) {
 			break;
 		}
-		jwt = signingInput + "." + encodedSignature;
+		jwt.reserve(signingInput.size() + 1 + encodedSignature.size());
+		jwt.assign(signingInput);
+		jwt.push_back('.');
+		jwt.append(encodedSignature);
 		signedToken = true;
 	} while (false);
 
@@ -767,12 +891,60 @@ CurierResult CurierCrypto::createVapidJwt(
 	secureZero(privateKey.data(), privateKey.size());
 	secureZero(signature.data(), signature.size());
 	secureZero(hash.data(), hash.size());
+	secureClear(payloadJson);
+	secureClear(signingInput);
 	if (!signedToken) {
 		jwt.clear();
 		expiresAt = 0;
 		return CurierResult::failure(CurierStatus::JwtError, "VAPID JWT signing failed");
 	}
 	return CurierResult::success();
+}
+
+CurierResult CurierCrypto::createVapidJwt(
+    const CurierVapid &vapid,
+    const std::string &audience,
+    uint64_t nowEpochSeconds,
+    uint32_t lifetimeSeconds,
+    std::string &jwt,
+    uint64_t &expiresAt
+) {
+	CurierString placedJwt = makeString(_placement);
+	CurierResult result = createVapidJwt(
+	    CurierVapidView{vapid.subject, vapid.publicKeyBase64, vapid.privateKeyBase64},
+	    audience,
+	    nowEpochSeconds,
+	    lifetimeSeconds,
+	    placedJwt,
+	    expiresAt
+	);
+	if (result) {
+		jwt.assign(placedJwt.data(), placedJwt.size());
+	} else {
+		jwt.clear();
+	}
+	secureClear(placedJwt);
+	return result;
+}
+
+bool CurierCrypto::base64UrlDecode(const std::string &input, std::vector<uint8_t> &output) {
+	CurierBytes placed = makeBytes(Strata::Placement::Default);
+	if (!::base64UrlDecode(input, Strata::Placement::Default, placed)) {
+		output.clear();
+		return false;
+	}
+	output.assign(placed.begin(), placed.end());
+	return true;
+}
+
+bool CurierCrypto::base64UrlEncode(const uint8_t *input, size_t inputSize, std::string &output) {
+	CurierString placed = makeString(Strata::Placement::Default);
+	if (!::base64UrlEncode(input, inputSize, Strata::Placement::Default, placed)) {
+		output.clear();
+		return false;
+	}
+	output.assign(placed.data(), placed.size());
+	return true;
 }
 
 } // namespace curier_internal
