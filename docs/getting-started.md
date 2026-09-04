@@ -7,6 +7,9 @@ Curier needs four things before it can deliver a notification:
 3. A browser Push API subscription.
 4. Valid Unix system time.
 
+Curier `v0.2.0` also requires Strata `v0.1.2` for memory placement and FreeRTOS
+ownership.
+
 ## VAPID configuration
 
 Configure the same VAPID public key that the browser used when creating its
@@ -50,7 +53,8 @@ CurierConfig config;
 config.vapidConfig = vapid;
 config.queueSize = 16;
 config.maxPayloadBytes = 3993;
-config.stackType = CurierStackType::Auto;
+config.memory.allocation = Strata::Placement::Default;
+config.memory.taskStack = Strata::Placement::PreferExternal;
 config.stackSize = 4096;
 
 CurierResult result = curier.init(config);
@@ -59,9 +63,13 @@ if (!result) {
 }
 ```
 
+`PreferExternal` preserves the old `CurierStackType::Auto` behavior: external
+RAM is preferred for the worker stack and internal RAM is the fallback.
+`RequireExternal` is the strict replacement for the old `Psram` mode.
+
 The default stack size is a starting point, not a universal runtime
-qualification. Inspect `diagnostics().stackHighWaterMarkBytes` under real TLS,
-payload, and retry workloads.
+qualification. Inspect `diagnostics().stackHighWaterMarkBytes` and
+`diagnostics().stackRegion` under real TLS, payload, and retry workloads.
 
 ## Subscription and send
 
@@ -82,8 +90,9 @@ payload.body = "Input 4 changed";
 CurierResult queued = curier.send(subscription, payload, onComplete);
 ```
 
-The subscription and serialized payload only need to remain valid until
-`send()` returns.
+The caller's subscription and payload only need to remain valid until `send()`
+returns. Accepted copies, serialized payload storage, and Curier-owned crypto
+working buffers use `config.memory.allocation`.
 
 ## Shutdown
 
@@ -94,3 +103,7 @@ CurierResult stopped = curier.end(5000);
 Shutdown cancels queued or retrying work and waits for the active HTTP operation
 to return through its configured request timeout. If `end()` times out, Curier
 remains in `Stopping`; call `end()` again later to finish cleanup.
+
+On successful shutdown the owner task resets Curier's `Strata::FreeRTOS::Task`
+after the worker publishes completion and suspends. This releases the task stack
+and TCB before `end()` returns.

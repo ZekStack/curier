@@ -1,5 +1,7 @@
 #include "CurierPayload.h"
 
+#include <strata/arduinojson/Allocator.h>
+
 #include <cstring>
 
 namespace {
@@ -50,8 +52,33 @@ CurierResult validateAction(JsonObjectConst action) {
 	return CurierResult::success();
 }
 
-CurierResult
-validateAndSerialize(JsonVariantConst payload, size_t maxPayloadBytes, std::string &json) {
+class CurierStringWriter {
+  public:
+	explicit CurierStringWriter(curier_internal::CurierString &target) : _target(target) {
+	}
+
+	size_t write(uint8_t value) {
+		_target.push_back(static_cast<char>(value));
+		return 1;
+	}
+
+	size_t write(const uint8_t *buffer, size_t size) {
+		if (buffer == nullptr || size == 0) {
+			return 0;
+		}
+		_target.append(reinterpret_cast<const char *>(buffer), size);
+		return size;
+	}
+
+  private:
+	curier_internal::CurierString &_target;
+};
+
+CurierResult validateAndSerialize(
+    JsonVariantConst payload,
+    size_t maxPayloadBytes,
+    curier_internal::CurierString &json
+) {
 	json.clear();
 	if (!payload.is<JsonObjectConst>()) {
 		return CurierResult::failure(CurierStatus::InvalidPayload, "payload must be a JSON object");
@@ -142,7 +169,8 @@ validateAndSerialize(JsonVariantConst payload, size_t maxPayloadBytes, std::stri
 		);
 	}
 	json.reserve(measured);
-	if (serializeJson(payload, json) != measured) {
+	CurierStringWriter writer(json);
+	if (serializeJson(payload, writer) != measured) {
 		json.clear();
 		return CurierResult::failure(CurierStatus::InvalidPayload, "payload serialization failed");
 	}
@@ -153,9 +181,14 @@ validateAndSerialize(JsonVariantConst payload, size_t maxPayloadBytes, std::stri
 
 namespace curier_internal {
 
-CurierResult
-serializePayload(const CurierPayload &payload, size_t maxPayloadBytes, std::string &json) {
-	JsonDocument document;
+CurierResult serializePayload(
+    const CurierPayload &payload,
+    size_t maxPayloadBytes,
+    Strata::Placement placement,
+    CurierString &json
+) {
+	Strata::ArduinoJson::Allocator allocator{placement};
+	JsonDocument document{&allocator};
 	document["title"] = payload.title;
 	document["body"] = payload.body;
 	if (payload.tag.has_value()) {
@@ -199,11 +232,17 @@ serializePayload(const CurierPayload &payload, size_t maxPayloadBytes, std::stri
 	if (payload.timestamp.has_value()) {
 		document["timestamp"] = *payload.timestamp;
 	}
+	if (document.overflowed()) {
+		return CurierResult::failure(
+		    CurierStatus::AllocationFailed,
+		    "payload JSON allocation failed"
+		);
+	}
 	return validateAndSerialize(document.as<JsonVariantConst>(), maxPayloadBytes, json);
 }
 
 CurierResult
-serializePayload(const JsonDocument &payload, size_t maxPayloadBytes, std::string &json) {
+serializePayload(const JsonDocument &payload, size_t maxPayloadBytes, CurierString &json) {
 	return validateAndSerialize(payload.as<JsonVariantConst>(), maxPayloadBytes, json);
 }
 

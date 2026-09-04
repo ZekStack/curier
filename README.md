@@ -1,11 +1,14 @@
 # Curier
 
 Curier is an asynchronous Web Push client for Arduino ESP32 with VAPID
-authentication, RFC 8291 `aes128gcm` payload encryption, and bounded work
-queues.
+authentication, RFC 8291 `aes128gcm` payload encryption, bounded work queues,
+and Strata-backed memory ownership.
 
 Curier is designed for firmware that needs to enqueue browser notifications
 without performing TLS, cryptography, or retry delays on the caller's task.
+Curier owns Web Push orchestration and lifecycle policy while
+[Strata](https://github.com/ZekStack/strata) owns memory placement and low-level
+FreeRTOS storage.
 
 [![CI](https://github.com/ZekStack/curier/actions/workflows/ci.yml/badge.svg)](https://github.com/ZekStack/curier/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ZekStack/curier?sort=semver)](https://github.com/ZekStack/curier/releases)
@@ -16,21 +19,26 @@ without performing TLS, cryptography, or retry delays on the caller's task.
 * **Modern Web Push** - implements RFC 8291/8188 `aes128gcm`; the legacy
   `aesgcm` encoding is intentionally not supported.
 * **Async ownership** - accepted subscriptions, payloads, and callbacks are
-  copied into a bounded queue and processed by Curier's own FreeRTOS task.
+  copied into a bounded queue and processed by Curier's own worker task.
+* **Consistent memory policy** - `Strata::MemoryPolicy` controls Curier-owned
+  movable runtime storage and worker-stack placement.
+* **Strata-owned FreeRTOS storage** - task stack/TCB, recursive mutexes, and the
+  shutdown semaphore use Strata ownership primitives.
 * **VAPID authentication** - validates the configured P-256 key pair and signs
   ES256 JWTs with a small per-origin cache.
-* **Explicit results** - initialization and enqueue operations return
-  `CurierResult`; terminal delivery uses `CurierSendResult`.
 * **Controlled retries** - fixed, exponential, or application-defined retry
   policies can honor `Retry-After`.
-* **Time integration** - uses standard system time by default, while allowing a
-  provider to be registered before or after `init()`.
+* **Runtime visibility** - diagnostics separate requested placement from the
+  observed memory region.
 
-## Install
+## Dependencies
+
+Curier `v0.2.0` requires:
+
+* Strata `v0.1.2`
+* ArduinoJson `>= 7.0.0`
 
 ### PlatformIO
-
-Curier is built for Arduino ESP32 and depends on ArduinoJson v7.
 
 ```ini
 [env:esp32dev]
@@ -39,7 +47,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/curier.git
+  https://github.com/ZekStack/curier.git#v0.2.0
   bblanchon/ArduinoJson@>=7.0.0
 
 build_flags =
@@ -48,17 +56,19 @@ build_unflags =
   -std=gnu++11
 ```
 
+Curier's `library.json` pins Strata `v0.1.2`, so PlatformIO resolves it as a
+transitive dependency.
+
 ### Arduino IDE
 
-Curier is not published to Arduino Library Manager yet.
+Curier and Strata are not published to Arduino Library Manager yet. Install both
+repositories into the Arduino libraries directory and install ArduinoJson v7
+through Library Manager:
 
-Install it by downloading the repository ZIP or cloning it into:
-
-```txt
+```text
+Arduino/libraries/Strata
 Arduino/libraries/Curier
 ```
-
-Install ArduinoJson v7 through Library Manager.
 
 ## Quick start
 
@@ -73,7 +83,9 @@ void setup() {
     config.vapidConfig.subject = "mailto:notify@example.com";
     config.vapidConfig.publicKeyBase64 = "BAvapidPublicKeyBase64Url...";
     config.vapidConfig.privateKeyBase64 = "vapidPrivateKeyBase64Url...";
-    config.stackType = CurierStackType::Auto;
+
+    config.memory.allocation = Strata::Placement::Default;
+    config.memory.taskStack = Strata::Placement::PreferExternal;
     config.stackSize = 4096;
     config.coreId = tskNO_AFFINITY;
     config.queueSize = 16;
@@ -82,6 +94,7 @@ void setup() {
 
     CurierResult initResult = curier.init(config);
     if (!initResult) {
+        ESP_LOGE("WEBPUSH", "Curier init failed: %s", initResult.message);
         return;
     }
 
@@ -93,8 +106,6 @@ void setup() {
     CurierPayload payload;
     payload.title = "Hello";
     payload.body = "ESP32";
-    payload.tag = "demo";
-    payload.icon = "https://example.com/icon.png";
 
     CurierResult queued = curier.send(
         subscription,
@@ -123,7 +134,62 @@ void loop() {
 }
 ```
 
-## Important notes
+## Memory policy
+
+Curier uses the ZekStack-standard configuration shape:
+
+```cpp
+config.memory.allocation = Strata::Placement::PreferExternal;
+config.memory.taskStack = Strata::Placement::PreferExternal;
+```
+
+`memory.allocation` applies to Curier-owned movable runtime storage, including
+queue backing, accepted subscription/payload copies, runtime configuration
+strings, JWT cache, crypto working buffers, Curier-created ArduinoJson storage,
+and dynamic HTTP scratch storage.
+
+`memory.taskStack` applies to the worker stack. FreeRTOS control blocks remain
+internal through Strata.
+
+The `v0.1.0` migration mapping is:
+
+| Curier v0.1.0 | Curier v0.2.0 |
+| --- | --- |
+| `CurierStackType::Auto` | `Strata::Placement::PreferExternal` |
+| `CurierStackType::Internal` | `Strata::Placement::Internal` |
+| `CurierStackType::Psram` | `Strata::Placement::RequireExternal` |
+| `config.stackType` | `config.memory.taskStack` |
+
+`PreferExternal` falls back to internal memory when external memory is not
+available. `RequireExternal` fails instead of consuming internal memory.
+
+Public `CurierConfig`, `CurierSubscription`, `CurierPayload`, caller-created
+`JsonDocument`, and callback/provider captures remain caller-owned standard C++
+objects. Curier applies its memory policy after it accepts and copies runtime
+data. Allocations internal to ESP-IDF and Mbed TLS are also outside Curier's
+allocator boundary.
+
+## Diagnostics
+
+```cpp
+CurierDiagnostics diag = curier.diagnostics();
+ESP_LOGI(
+    "WEBPUSH",
+    "stack requested=%s actual=%s",
+    Strata::toString(diag.requestedStackPlacement),
+    Strata::toString(diag.stackRegion)
+);
+```
+
+Diagnostics include queue depth, in-flight count, high-water marks, completion
+and retry counters, task stack high-water mark, general allocation placement,
+requested task-stack placement, observed stack region, queue storage placement
+and region, and shutdown-semaphore control region.
+
+Requested placement and observed region are deliberately separate. A
+`PreferExternal` request may validly report `Internal` after fallback.
+
+## Lifecycle and callbacks
 
 > [!IMPORTANT]
 > Curier callbacks run on Curier's worker task. Keep callbacks short and protect
@@ -137,25 +203,17 @@ void loop() {
 * Calling `end()` from Curier's callback returns `Busy`. Destroying the Curier
   instance from that callback is a fatal programming error; schedule destruction
   on another application task.
-* A successful `end()` means the worker task has been deleted with the matching
-  normal or capability-aware API and all owned runtime state has been released.
-  A timeout preserves the `Stopping` state so a later call can finish cleanup.
+* During shutdown the worker publishes final diagnostics, gives a Strata binary
+  semaphore, and suspends. `end()` resets the owned `Strata::FreeRTOS::Task`
+  from the owner context, releasing its stack and TCB before runtime state is
+  freed.
+* If `end()` times out, Curier preserves `Stopping` and all owned state so a
+  later call can finish cleanup.
 * `queueSize` bounds all accepted jobs, including the active job.
-* Subscriptions and JSON are validated and copied before `send()` returns.
-* Subscription endpoint authorities are validated before the HTTP request and
-  VAPID audience are constructed. Malformed ports and unbracketed IPv6 are
-  rejected.
-* The default clock is `std::time(nullptr)`. Configure system time before
-  delivery, for example with Tempo, SNTP, or another clock owner.
-* HTTPS verification is enabled by default through the ESP-IDF certificate
-  bundle when that feature is available.
-* A VAPID private key is a device secret. Do not log it or include it in public
-  firmware repositories.
-* Callbacks, time providers, and retry policies must not throw exceptions.
 
 ## Time and retry behavior
 
-Registering a time provider is optional. The provider may be installed before
+Curier uses `std::time(nullptr)` by default. A provider may be installed before
 or after initialization:
 
 ```cpp
@@ -181,55 +239,46 @@ config.retry.jitterPercent = 20;
 config.retry.respectRetryAfter = true;
 ```
 
-See [`docs/retries.md`](docs/retries.md) for a custom policy example.
+See [`docs/retries.md`](docs/retries.md) for custom retry-policy details.
+
+## Security notes
+
+Subscriptions and JSON are validated and copied before `send()` returns.
+Endpoint authorities are validated before HTTP delivery and VAPID audience
+construction. Malformed ports and unbracketed IPv6 are rejected.
+
+The VAPID private key is a device secret. Curier explicitly clears its copied
+private-key storage, cached JWTs, subscription auth secrets, plaintext payload
+copies, and sensitive cryptographic working buffers during normal release.
+Selecting external placement means those Curier-owned buffers may reside in
+external RAM; secure clearing still applies.
+
+HTTPS verification is enabled by default through the ESP-IDF certificate bundle
+when available.
 
 ## Examples
 
 | Example | Description |
 | --- | --- |
-| `Basic` | Initialize Curier and send a typed payload. |
+| `Basic` | Initialize Curier with Strata memory policy and send a typed payload. |
 | `ArduinoJson` | Send a validated ArduinoJson v7 document. |
 | `CustomTimeAndRetry` | Register a clock provider and custom retry policy. |
 
-Start with:
-
-```txt
-examples/Basic
-```
+Start with `examples/Basic`.
 
 ## Documentation
 
 | Document | Description |
 | --- | --- |
-| [`docs/getting-started.md`](docs/getting-started.md) | VAPID, subscription, clock, and first-send setup. |
-| [`docs/api.md`](docs/api.md) | Public API, result types, payloads, and callbacks. |
-| [`docs/configuration.md`](docs/configuration.md) | Queue, task, payload, TLS, TTL, and retry settings. |
-| [`docs/concurrency.md`](docs/concurrency.md) | Worker ownership, callback context, and shutdown guarantees. |
+| [`docs/getting-started.md`](docs/getting-started.md) | VAPID, memory policy, subscription, clock, and first-send setup. |
+| [`docs/api.md`](docs/api.md) | Public API, results, diagnostics, payloads, and callbacks. |
+| [`docs/configuration.md`](docs/configuration.md) | Memory, queue, task, payload, TLS, TTL, and retry settings. |
+| [`docs/concurrency.md`](docs/concurrency.md) | Worker ownership, callback context, and Strata-backed shutdown guarantees. |
 | [`docs/retries.md`](docs/retries.md) | Default and custom retry decisions. |
 | [`docs/protocol.md`](docs/protocol.md) | Supported Web Push protocol and wire behavior. |
-| [`docs/security.md`](docs/security.md) | Key handling, endpoint validation, TLS, and secret boundaries. |
-| [`docs/memory.md`](docs/memory.md) | Queue ownership, transient allocations, and stack qualification. |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common setup and delivery failures. |
-
-## API overview
-
-```cpp
-CurierResult init(const CurierConfig &config);
-CurierResult send(
-    const CurierSubscription &subscription,
-    const CurierPayload &payload,
-    CurierSendCallback callback
-);
-CurierResult send(
-    const CurierSubscription &subscription,
-    const JsonDocument &payload,
-    CurierSendCallback callback
-);
-CurierResult setTimeProvider(CurierTimeProvider provider);
-CurierResult clearTimeProvider();
-CurierResult end(uint32_t timeoutMs = 5000);
-CurierDiagnostics diagnostics() const;
-```
+| [`docs/security.md`](docs/security.md) | Key handling, placement, endpoint validation, TLS, and secret boundaries. |
+| [`docs/memory.md`](docs/memory.md) | Strata ownership boundary and lifecycle qualification. |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common setup, placement, and delivery failures. |
 
 ## Compatibility
 
@@ -237,58 +286,23 @@ CurierDiagnostics diagnostics() const;
 | --- | --- |
 | Framework | Arduino ESP32 |
 | Language | C++20 |
+| Memory layer | Strata `v0.1.2` |
 | Networking | ESP-IDF `esp_http_client` |
 | Encryption | RFC 8291/8188 `aes128gcm` only |
 | Authentication | VAPID ES256 |
 | JSON | ArduinoJson `>= 7.0.0` |
 | HTTPS | Certificate bundle, global CA store, or custom PEM |
-| Task stack | Internal RAM, PSRAM where supported, or automatic fallback |
-| Exceptions | Not used by Curier |
-| Version | `0.1.0` |
-
-## Configuration
-
-The defaults are intentionally bounded:
-
-```cpp
-CurierConfig config;
-config.queueSize = 16;
-config.maxPayloadBytes = 3993;
-config.maxEndpointBytes = 2048;
-config.stackSize = 4096;
-config.priority = 1;
-config.coreId = tskNO_AFFINITY;
-config.stackType = CurierStackType::Auto;
-config.requestTimeoutMs = 10000;
-config.ttlSeconds = 2419200;
-```
-
-`maxPayloadBytes` cannot exceed the 3993-byte single-record limit used by
-Curier. Encrypted bodies use a 4096-byte RFC 8188 record size.
-
-## Error handling
-
-```cpp
-CurierResult queued = curier.send(subscription, payload, onPushComplete);
-if (!queued) {
-    ESP_LOGE("WEBPUSH", "%s", queued.message);
-}
-```
-
-Transport and delivery details are separate in the terminal result:
-
-* `result.status` describes the Curier-level outcome.
-* `result.transportError` contains the ESP-IDF transport error.
-* `result.statusCode` contains the HTTP response code when available.
-* `result.attempts` is the number of delivery attempts.
+| Task stack | Strata `Default`, `Internal`, `PreferExternal`, or `RequireExternal` |
+| Exceptions | Not used by Curier APIs |
+| Version | `0.2.0` |
 
 ## Release qualification
 
 The host suite compares Curier's encrypted body byte-for-byte with the RFC 8291
 Appendix A vector and independently verifies generated VAPID ES256 signatures.
 Target sketches exercise queue bounds, callbacks, retries, cancellation,
-timeout recovery, and repeated Internal, Auto, and PSRAM lifecycle cleanup.
-Run the target sketches on the production board before tagging a release.
+timeout recovery, and repeated Internal, PreferExternal, and RequireExternal
+lifecycle cleanup across ESP32, ESP32-S3, ESP32-C3, and ESP32-P4 builds.
 
 ## License
 
@@ -298,6 +312,3 @@ MIT - see [`LICENSE.md`](LICENSE.md) and
 ## ZekStack
 
 Part of the ZekStack ESP32 library stack.
-
-ZekStack libraries are designed to provide small, reusable building blocks for
-ESP32 applications.

@@ -18,7 +18,7 @@ void expect(bool condition, const char *message) {
 	}
 }
 
-CurierConfig testConfig(CurierStackType stackType) {
+CurierConfig testConfig(Strata::Placement stackPlacement) {
 	CurierConfig config;
 	config.vapidConfig.subject = "mailto:test@example.com";
 	config.vapidConfig.publicKeyBase64 =
@@ -26,13 +26,14 @@ CurierConfig testConfig(CurierStackType stackType) {
 	config.vapidConfig.privateKeyBase64 = "Qu8KQ-mRYC-ACZNsrftkSEaMv4qFAP9b-6Q7tK3lZX4";
 	config.queueSize = 2;
 	config.stackSize = 6144;
-	config.stackType = stackType;
+	config.memory.allocation = Strata::Placement::Default;
+	config.memory.taskStack = stackPlacement;
 	config.retry.mode = CurierRetryMode::Disabled;
 	return config;
 }
 
-bool runLifecycleCycles(CurierStackType stackType, const char *label) {
-	CurierConfig config = testConfig(stackType);
+bool runLifecycleCycles(Strata::Placement stackPlacement, const char *label) {
+	CurierConfig config = testConfig(stackPlacement);
 
 	// Warm up Mbed TLS and standard-library allocations before taking the baseline.
 	if (!curier.init(config) || !curier.end(5000)) {
@@ -47,6 +48,11 @@ bool runLifecycleCycles(CurierStackType stackType, const char *label) {
 		CurierResult initialized = curier.init(config);
 		if (!initialized) {
 			Serial.printf("%s init failed at cycle %u: %s\n", label, cycle, initialized.message);
+			return false;
+		}
+		CurierDiagnostics diagnostics = curier.diagnostics();
+		if (diagnostics.requestedStackPlacement != stackPlacement) {
+			Serial.printf("%s requested placement mismatch at cycle %u\n", label, cycle);
 			return false;
 		}
 		CurierResult stopped = curier.end(5000);
@@ -91,7 +97,7 @@ void setup() {
 	});
 	expect(providerResult.result, "provider registration before init failed");
 
-	CurierResult initialized = curier.init(testConfig(CurierStackType::Internal));
+	CurierResult initialized = curier.init(testConfig(Strata::Placement::Internal));
 	expect(initialized.result, "initialization failed");
 	expect(curier.initialized(), "initialized state was not published");
 
@@ -121,15 +127,18 @@ void setup() {
 	expect(!curier.initialized(), "shutdown state was not published");
 
 	expect(
-	    runLifecycleCycles(CurierStackType::Internal, "internal"),
+	    runLifecycleCycles(Strata::Placement::Internal, "internal"),
 	    "internal lifecycle stress failed"
 	);
-	expect(runLifecycleCycles(CurierStackType::Auto, "auto"), "auto lifecycle stress failed");
+	expect(
+	    runLifecycleCycles(Strata::Placement::PreferExternal, "prefer-external"),
+	    "prefer-external lifecycle stress failed"
+	);
 
 	if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
 		expect(
-		    runLifecycleCycles(CurierStackType::Psram, "psram"),
-		    "PSRAM lifecycle stress failed"
+		    runLifecycleCycles(Strata::Placement::RequireExternal, "require-external"),
+		    "required-external lifecycle stress failed"
 		);
 	}
 

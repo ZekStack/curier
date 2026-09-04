@@ -1,6 +1,8 @@
 #include "CurierHttp.h"
 
+#include <array>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <strings.h>
 #include <utility>
@@ -21,7 +23,8 @@ extern "C" {
 namespace {
 
 struct ResponseContext {
-	std::string retryAfter;
+	std::array<char, 65> retryAfter{};
+	size_t retryAfterLength = 0;
 };
 
 #ifdef CURIER_ENABLE_TEST_HOOKS
@@ -34,9 +37,13 @@ esp_err_t handleHttpEvent(esp_http_client_event_t *event) {
 	}
 	auto *context = static_cast<ResponseContext *>(event->user_data);
 	if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key != nullptr &&
-	    event->header_value != nullptr && strcasecmp(event->header_key, "Retry-After") == 0 &&
-	    std::strlen(event->header_value) <= 64) {
-		context->retryAfter = event->header_value;
+	    event->header_value != nullptr && strcasecmp(event->header_key, "Retry-After") == 0) {
+		const size_t length = std::strlen(event->header_value);
+		if (length <= 64) {
+			std::memcpy(context->retryAfter.data(), event->header_value, length);
+			context->retryAfter[length] = '\0';
+			context->retryAfterLength = length;
+		}
 	}
 	return ESP_OK;
 }
@@ -58,10 +65,10 @@ CurierSendResult sendFailure(
 namespace curier_internal {
 
 CurierHttpResponse sendWebPushRequest(
-    const CurierConfig &config,
-    const CurierSubscription &subscription,
-    const std::string &jwt,
-    const std::vector<uint8_t> &body
+    const CurierRuntimeConfig &config,
+    CurierSubscriptionView subscription,
+    std::string_view jwt,
+    std::span<const uint8_t> body
 ) {
 #ifdef CURIER_ENABLE_TEST_HOOKS
 	if (testTransport) {
@@ -69,7 +76,7 @@ CurierHttpResponse sendWebPushRequest(
 	}
 #endif
 
-	CurierHttpResponse response;
+	CurierHttpResponse response(config.memory.allocation);
 	if (subscription.endpoint.empty() || jwt.empty() || body.empty() ||
 	    body.size() > static_cast<size_t>(INT_MAX) ||
 	    config.requestTimeoutMs > static_cast<uint32_t>(INT_MAX)) {
@@ -80,7 +87,7 @@ CurierHttpResponse sendWebPushRequest(
 
 	ResponseContext context;
 	esp_http_client_config_t httpConfig = {};
-	httpConfig.url = subscription.endpoint.c_str();
+	httpConfig.url = subscription.endpoint.data();
 	httpConfig.method = HTTP_METHOD_POST;
 	httpConfig.timeout_ms = static_cast<int>(config.requestTimeoutMs);
 	httpConfig.buffer_size_tx = 4096;
@@ -113,13 +120,25 @@ CurierHttpResponse sendWebPushRequest(
 		return response;
 	}
 
-	const std::string authorization =
-	    "vapid t=" + jwt + ", k=" + config.vapidConfig.publicKeyBase64;
-	const std::string ttl = std::to_string(config.ttlSeconds);
+	CurierString authorization{Strata::Allocator<char>{config.memory.allocation}};
+	authorization.assign("vapid t=");
+	authorization.append(jwt.data(), jwt.size());
+	authorization.append(", k=");
+	authorization.append(config.vapidPublicKeyBase64);
+
+	std::array<char, 16> ttl{};
+	const int ttlLength = std::snprintf(ttl.data(), ttl.size(), "%u", config.ttlSeconds);
+	if (ttlLength <= 0 || static_cast<size_t>(ttlLength) >= ttl.size()) {
+		esp_http_client_cleanup(client);
+		response.result =
+		    sendFailure(CurierStatus::InternalError, "HTTP TTL formatting failed");
+		return response;
+	}
+
 	esp_err_t setupResult =
 	    esp_http_client_set_header(client, "Authorization", authorization.c_str());
 	if (setupResult == ESP_OK) {
-		setupResult = esp_http_client_set_header(client, "TTL", ttl.c_str());
+		setupResult = esp_http_client_set_header(client, "TTL", ttl.data());
 	}
 	if (setupResult == ESP_OK) {
 		setupResult = esp_http_client_set_header(client, "Content-Encoding", "aes128gcm");
@@ -144,7 +163,9 @@ CurierHttpResponse sendWebPushRequest(
 
 	const esp_err_t transportResult = esp_http_client_perform(client);
 	const int statusCode = esp_http_client_get_status_code(client);
-	response.retryAfter = std::move(context.retryAfter);
+	if (context.retryAfterLength > 0) {
+		response.retryAfter.assign(context.retryAfter.data(), context.retryAfterLength);
+	}
 	esp_http_client_cleanup(client);
 
 	if (transportResult != ESP_OK) {
