@@ -41,7 +41,7 @@ jobs:
     runs-on: [self-hosted, zekstack-ci]
     steps:
       - uses: actions/checkout@v4
-      - name: Audit library boundaries, protocol, and lifecycle
+      - name: Audit library boundaries, protocol, lifecycle, and ownership
         run: |
           set -e
           if grep -RInE '#include[[:space:]]+[<"](Accord|Flow|Fresh|Link|Phase|Pulse|Seal|Signal|Tempo|Trace|Worker)\.h[>"]' src; then
@@ -64,13 +64,17 @@ jobs:
             echo "Curier must not depend on ESP-IDF allocation internals"
             exit 1
           fi
+          if grep -RInE 'heap_caps_|MALLOC_CAP_|ps_malloc|xTaskCreate|vTaskDelete|xQueueCreate|xSemaphoreCreate|std::make_unique|std::make_shared|(^|[^[:alnum:]_])malloc[[:space:]]*\(|(^|[^[:alnum:]_])calloc[[:space:]]*\(|(^|[^[:alnum:]_])realloc[[:space:]]*\(|(^|[^[:alnum:]_])free[[:space:]]*\(|(^|[^[:alnum:]_])new[[:space:](]|(^|[^[:alnum:]_])delete[[:space:](]' src; then
+            echo "Curier-owned allocation and FreeRTOS storage must route through Strata"
+            exit 1
+          fi
 
   host-tests:
     runs-on: [self-hosted, zekstack-ci]
     needs: source-audit
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch Strata headers
+      - name: Fetch Strata host backend
         run: |
           STRATA_DIR="$RUNNER_TEMP/strata"
           rm -rf "$STRATA_DIR"
@@ -83,6 +87,8 @@ jobs:
             -I"$STRATA_DIR/src" \
             -Itests/host/stubs \
             -Isrc \
+            "$STRATA_DIR/src/strata/Allocation.cpp" \
+            "$STRATA_DIR/src/strata/internal/PlatformGeneric.cpp" \
             src/internal/CurierProtocol.cpp \
             src/internal/CurierRetry.cpp \
             tests/host/test_retry_protocol.cpp \
@@ -97,7 +103,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Fetch Strata headers
+      - name: Fetch Strata host backend
         run: |
           STRATA_DIR="$RUNNER_TEMP/strata"
           rm -rf "$STRATA_DIR"
@@ -120,6 +126,8 @@ jobs:
             -I"$ARDUINOJSON_INCLUDE" \
             -Itests/host/stubs \
             -Isrc \
+            "$STRATA_DIR/src/strata/Allocation.cpp" \
+            "$STRATA_DIR/src/strata/internal/PlatformGeneric.cpp" \
             src/internal/CurierCrypto.cpp \
             tests/host/test_crypto.cpp \
             -lmbedtls -lmbedx509 -lmbedcrypto \
@@ -199,7 +207,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v version="$VERSION" '
-            $0 == "## " version {capture=1; next}
+            $0 == "## " {capture=1; next}
             capture && /^## / {exit}
             capture {print}
           ' CHANGELOG.md > /tmp/release-notes.md
