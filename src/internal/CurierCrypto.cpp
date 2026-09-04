@@ -6,7 +6,6 @@
 #include <array>
 #include <cstring>
 #include <limits>
-#include <new>
 
 extern "C" {
 #include "mbedtls/base64.h"
@@ -375,27 +374,25 @@ struct CurierCrypto::State {
 	mbedtls_ctr_drbg_context random;
 	bool initialized = false;
 
-	State() {
+	State() noexcept {
 		mbedtls_entropy_init(&entropy);
 		mbedtls_ctr_drbg_init(&random);
 	}
 
-	~State() {
+	~State() noexcept {
 		mbedtls_ctr_drbg_free(&random);
 		mbedtls_entropy_free(&entropy);
 	}
 };
 
-CurierCrypto::CurierCrypto() : _state(new(std::nothrow) State()) {
-}
-
-CurierCrypto::~CurierCrypto() {
-	delete _state;
-	_state = nullptr;
+CurierCrypto::CurierCrypto(Strata::Placement placement) noexcept : _placement(placement) {
 }
 
 CurierResult CurierCrypto::init() {
-	if (_state == nullptr) {
+	if (!_state) {
+		_state = Strata::makeUnique<State>(_placement);
+	}
+	if (!_state) {
 		return CurierResult::failure(
 		    CurierStatus::AllocationFailed,
 		    "crypto state allocation failed"
