@@ -51,7 +51,7 @@ curier_internal::CurierBytes makeBytes(Strata::Placement placement) {
 	return curier_internal::CurierBytes{Strata::Allocator<uint8_t>{placement}};
 }
 
-curier_internal::CurierString makeString(Strata::Placement placement) {
+curier_internal::CurierString makeCurierString(Strata::Placement placement) {
 	return curier_internal::CurierString{Strata::Allocator<char>{placement}};
 }
 
@@ -94,7 +94,7 @@ bool validBase64UrlShape(std::string_view input) {
 	return input.size() % 4 != 1;
 }
 
-bool base64UrlDecode(
+bool decodeBase64Url(
     std::string_view input,
     Strata::Placement placement,
     curier_internal::CurierBytes &output
@@ -103,7 +103,7 @@ bool base64UrlDecode(
 	if (!validBase64UrlShape(input)) {
 		return false;
 	}
-	curier_internal::CurierString padded = makeString(placement);
+	curier_internal::CurierString padded = makeCurierString(placement);
 	padded.assign(input.data(), input.size());
 	for (char &character : padded) {
 		if (character == '-') {
@@ -144,7 +144,7 @@ bool base64UrlDecode(
 	return true;
 }
 
-bool base64UrlEncode(
+bool encodeBase64Url(
     const uint8_t *input,
     size_t inputSize,
     Strata::Placement placement,
@@ -176,7 +176,7 @@ bool decodePublicKey(
     curier_internal::CurierBytes &key
 ) {
 	return (encoded.size() == 87 || encoded.size() == 88) &&
-	       base64UrlDecode(encoded, placement, key) && key.size() == kP256PublicKeyBytes &&
+	       decodeBase64Url(encoded, placement, key) && key.size() == kP256PublicKeyBytes &&
 	       key[0] == 0x04;
 }
 
@@ -186,7 +186,7 @@ bool decodePrivateKey(
     curier_internal::CurierBytes &key
 ) {
 	return (encoded.size() == 43 || encoded.size() == 44) &&
-	       base64UrlDecode(encoded, placement, key) && key.size() == kP256PrivateKeyBytes;
+	       decodeBase64Url(encoded, placement, key) && key.size() == kP256PrivateKeyBytes;
 }
 
 bool validVapidSubject(std::string_view subject) {
@@ -279,7 +279,7 @@ CurierResult encryptWithInputs(
 	curier_internal::CurierBytes authSecret = makeBytes(placement);
 	if (!decodePublicKey(subscription.p256dh, placement, receiverPublic) ||
 	    (subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
-	    !base64UrlDecode(subscription.auth, placement, authSecret) ||
+	    !decodeBase64Url(subscription.auth, placement, authSecret) ||
 	    authSecret.size() != kAuthSecretBytes) {
 		secureZero(authSecret.data(), authSecret.size());
 		return CurierResult::failure(
@@ -522,6 +522,8 @@ struct CurierCrypto::State {
 CurierCrypto::CurierCrypto(Strata::Placement placement) noexcept : _placement(placement) {
 }
 
+CurierCrypto::~CurierCrypto() noexcept = default;
+
 CurierResult CurierCrypto::init() {
 	if (!_state) {
 		_state = Strata::makeUnique<State>(_placement);
@@ -569,7 +571,7 @@ CurierResult CurierCrypto::validateSubscription(CurierSubscriptionView subscript
 	}
 	CurierBytes authSecret = makeBytes(_placement);
 	if ((subscription.auth.size() != 22 && subscription.auth.size() != 24) ||
-	    !base64UrlDecode(subscription.auth, _placement, authSecret) ||
+	    !decodeBase64Url(subscription.auth, _placement, authSecret) ||
 	    authSecret.size() != kAuthSecretBytes) {
 		secureZero(authSecret.data(), authSecret.size());
 		return CurierResult::failure(
@@ -782,9 +784,9 @@ CurierResult CurierCrypto::createVapidJwt(
 		return CurierResult::failure(CurierStatus::JwtError, "VAPID JWT expiration overflow");
 	}
 
-	CurierString audienceText = makeString(_placement);
+	CurierString audienceText = makeCurierString(_placement);
 	audienceText.assign(audience.data(), audience.size());
-	CurierString subjectText = makeString(_placement);
+	CurierString subjectText = makeCurierString(_placement);
 	subjectText.assign(vapid.subject.data(), vapid.subject.size());
 
 	static constexpr char kHeader[] = R"({"alg":"ES256","typ":"JWT"})";
@@ -797,7 +799,7 @@ CurierResult CurierCrypto::createVapidJwt(
 		secureZero(privateKey.data(), privateKey.size());
 		return CurierResult::failure(CurierStatus::AllocationFailed, "VAPID JWT JSON allocation failed");
 	}
-	CurierString payloadJson = makeString(_placement);
+	CurierString payloadJson = makeCurierString(_placement);
 	CurierStringWriter writer(payloadJson);
 	if (serializeJson(payload, writer) == 0) {
 		secureZero(privateKey.data(), privateKey.size());
@@ -807,15 +809,15 @@ CurierResult CurierCrypto::createVapidJwt(
 		);
 	}
 
-	CurierString encodedHeader = makeString(_placement);
-	CurierString encodedPayload = makeString(_placement);
-	if (!base64UrlEncode(
+	CurierString encodedHeader = makeCurierString(_placement);
+	CurierString encodedPayload = makeCurierString(_placement);
+	if (!encodeBase64Url(
 	        reinterpret_cast<const uint8_t *>(kHeader),
 	        sizeof(kHeader) - 1,
 	        _placement,
 	        encodedHeader
 	    ) ||
-	    !base64UrlEncode(
+	    !encodeBase64Url(
 	        reinterpret_cast<const uint8_t *>(payloadJson.data()),
 	        payloadJson.size(),
 	        _placement,
@@ -824,7 +826,7 @@ CurierResult CurierCrypto::createVapidJwt(
 		secureZero(privateKey.data(), privateKey.size());
 		return CurierResult::failure(CurierStatus::JwtError, "VAPID JWT base64url encoding failed");
 	}
-	CurierString signingInput = makeString(_placement);
+	CurierString signingInput = makeCurierString(_placement);
 	signingInput.reserve(encodedHeader.size() + 1 + encodedPayload.size());
 	signingInput.append(encodedHeader);
 	signingInput.push_back('.');
@@ -871,10 +873,8 @@ CurierResult CurierCrypto::createVapidJwt(
 		    mbedtls_mpi_write_binary(&signatureS, signature.data() + 32, 32) != 0) {
 			break;
 		}
-		CurierString encodedSignature = makeString(_placement);
-		if (!base64UrlEncode(
-		        signature.data(), signature.size(), _placement, encodedSignature
-		    )) {
+		CurierString encodedSignature = makeCurierString(_placement);
+		if (!encodeBase64Url(signature.data(), signature.size(), _placement, encodedSignature)) {
 			break;
 		}
 		jwt.reserve(signingInput.size() + 1 + encodedSignature.size());
@@ -909,7 +909,7 @@ CurierResult CurierCrypto::createVapidJwt(
     std::string &jwt,
     uint64_t &expiresAt
 ) {
-	CurierString placedJwt = makeString(_placement);
+	CurierString placedJwt = makeCurierString(_placement);
 	CurierResult result = createVapidJwt(
 	    CurierVapidView{vapid.subject, vapid.publicKeyBase64, vapid.privateKeyBase64},
 	    audience,
@@ -929,7 +929,7 @@ CurierResult CurierCrypto::createVapidJwt(
 
 bool CurierCrypto::base64UrlDecode(const std::string &input, std::vector<uint8_t> &output) {
 	CurierBytes placed = makeBytes(Strata::Placement::Default);
-	if (!::base64UrlDecode(input, Strata::Placement::Default, placed)) {
+	if (!::decodeBase64Url(input, Strata::Placement::Default, placed)) {
 		output.clear();
 		return false;
 	}
@@ -938,8 +938,8 @@ bool CurierCrypto::base64UrlDecode(const std::string &input, std::vector<uint8_t
 }
 
 bool CurierCrypto::base64UrlEncode(const uint8_t *input, size_t inputSize, std::string &output) {
-	CurierString placed = makeString(Strata::Placement::Default);
-	if (!::base64UrlEncode(input, inputSize, Strata::Placement::Default, placed)) {
+	CurierString placed = makeCurierString(Strata::Placement::Default);
+	if (!::encodeBase64Url(input, inputSize, Strata::Placement::Default, placed)) {
 		output.clear();
 		return false;
 	}
