@@ -18,7 +18,7 @@ struct CurierEncryptionInputs {
 class CurierCrypto {
   public:
 	explicit CurierCrypto(Strata::Placement placement = Strata::Placement::Default) noexcept;
-	~CurierCrypto() noexcept = default;
+	~CurierCrypto() noexcept;
 
 	CurierCrypto(const CurierCrypto &) = delete;
 	CurierCrypto &operator=(const CurierCrypto &) = delete;
@@ -31,11 +31,7 @@ class CurierCrypto {
 	CurierResult validateSubscription(CurierSubscriptionView subscription);
 	CurierResult validateSubscription(const CurierSubscription &subscription);
 
-	CurierResult encrypt(
-	    std::string_view plaintext,
-	    CurierSubscriptionView subscription,
-	    CurierBytes &body
-	);
+	CurierResult encrypt(std::string_view plaintext, CurierSubscriptionView subscription, CurierBytes &body);
 
 	CurierResult createVapidJwt(
 	    CurierVapidView vapid,
