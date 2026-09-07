@@ -4,7 +4,7 @@
 
 #include <cassert>
 #include <cstdint>
-#include <string>
+#include <string_view>
 
 namespace {
 
@@ -19,22 +19,22 @@ void testResultContract() {
 }
 
 void testEndpointOrigins() {
-	std::string origin;
+	curier_internal::CurierString origin = Strata::makeString();
 
 	assert(curier_internal::endpointOrigin("https://Push.Example.com/send/abc", 2048, origin));
-	assert(origin == "https://push.example.com");
+	assert(std::string_view(origin.data(), origin.size()) == "https://push.example.com");
 
 	assert(curier_internal::endpointOrigin("HTTPS://push.example.com:443/send", 2048, origin));
-	assert(origin == "https://push.example.com");
+	assert(std::string_view(origin.data(), origin.size()) == "https://push.example.com");
 
 	assert(curier_internal::endpointOrigin("https://push.example.com:8443/send", 2048, origin));
-	assert(origin == "https://push.example.com:8443");
+	assert(std::string_view(origin.data(), origin.size()) == "https://push.example.com:8443");
 
 	assert(curier_internal::endpointOrigin("https://[2001:db8::1]/send", 2048, origin));
-	assert(origin == "https://[2001:db8::1]");
+	assert(std::string_view(origin.data(), origin.size()) == "https://[2001:db8::1]");
 
 	assert(curier_internal::endpointOrigin("https://[2001:db8::1]:8443/send", 2048, origin));
-	assert(origin == "https://[2001:db8::1]:8443");
+	assert(std::string_view(origin.data(), origin.size()) == "https://[2001:db8::1]:8443");
 
 	assert(!curier_internal::endpointOrigin("http://push.example.com/send", 2048, origin));
 	assert(!curier_internal::endpointOrigin("https://user@push.example.com/send", 2048, origin));

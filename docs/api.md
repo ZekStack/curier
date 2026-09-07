@@ -30,6 +30,22 @@ struct CurierSendResult : CurierResult {
 `statusCode` is zero when no HTTP response was received. `attempts` includes the
 first attempt.
 
+## Configuration and memory
+
+`CurierConfig` exposes the shared Strata memory policy:
+
+```cpp
+Strata::MemoryPolicy memory{
+    .allocation = Strata::Placement::Default,
+    .taskStack = Strata::Placement::PreferExternal,
+};
+```
+
+`memory.allocation` controls Curier-owned movable runtime allocations.
+`memory.taskStack` controls the worker stack. See
+[`configuration.md`](configuration.md) and [`memory.md`](memory.md) for the
+ownership boundary and migration mapping from `v0.1.0`.
+
 ## Lifecycle
 
 ```cpp
@@ -38,8 +54,13 @@ CurierResult end(uint32_t timeoutMs = 5000);
 bool initialized() const;
 ```
 
-`init()` validates the complete configuration and VAPID key pair before
-starting the worker. Repeated initialization returns `AlreadyInitialized`.
+`init()` validates the complete configuration, Strata memory policy, and VAPID
+key pair before starting the worker. Repeated initialization returns
+`AlreadyInitialized`.
+
+A successful `end()` means the externally-owned Strata task has been reset from
+the owner context and Curier's queue, semaphore, crypto state, JWT cache, and
+runtime configuration have been released.
 
 ## Sending
 
@@ -57,9 +78,10 @@ CurierResult send(
 );
 ```
 
-Both overloads apply the same payload schema and size limit. Unknown JSON fields
-are rejected so payload behavior does not silently diverge between typed and
-ArduinoJson callers.
+Both overloads apply the same payload schema and size limit. Caller-owned
+subscription/payload objects remain standard C++/ArduinoJson objects. After
+validation, Curier copies accepted data into storage backed by
+`config.memory.allocation`.
 
 Required JSON fields:
 
@@ -104,9 +126,21 @@ parsed `Retry-After` delay when available. Return `{false, 0}` to terminate or
 CurierDiagnostics diagnostics() const;
 ```
 
-Diagnostics include current queue depth, accepted in-flight count, high-water
-mark, completion counters, retry count, cancellation count, task stack
-high-water mark, and requested/actual task stack memory.
+Diagnostics retain the existing queue/completion/retry counters and stack
+high-water mark and add Strata placement visibility:
+
+```cpp
+Strata::Placement allocationPlacement;
+Strata::Placement requestedStackPlacement;
+Strata::Region stackRegion;
+Strata::Placement queueStoragePlacement;
+Strata::Region queueStorageRegion;
+Strata::Region shutdownSignalControlRegion;
+```
+
+Requested placement and observed region are intentionally separate. For
+example, `PreferExternal` may legitimately report an internal region after
+fallback on a target without usable external RAM.
 
 ## Status strings
 

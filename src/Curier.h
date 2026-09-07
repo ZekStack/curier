@@ -2,11 +2,11 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <Strata.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -43,12 +43,6 @@ enum class CurierStatus : uint8_t {
 	Busy,
 	Timeout,
 	InternalError,
-};
-
-enum class CurierStackType : uint8_t {
-	Auto,
-	Internal,
-	Psram,
 };
 
 enum class CurierRetryMode : uint8_t {
@@ -152,6 +146,11 @@ using CurierTimeProvider = std::function<bool(uint64_t &epochSeconds)>;
 using CurierRetryPolicy = std::function<CurierRetryDecision(const CurierRetryContext &context)>;
 
 struct CurierConfig {
+	Strata::MemoryPolicy memory{
+	    .allocation = Strata::Placement::Default,
+	    .taskStack = Strata::Placement::PreferExternal,
+	};
+
 	CurierVapid vapidConfig;
 
 	size_t queueSize = 16;
@@ -161,7 +160,6 @@ struct CurierConfig {
 	uint32_t stackSize = 4096;
 	UBaseType_t priority = 1;
 	BaseType_t coreId = tskNO_AFFINITY;
-	CurierStackType stackType = CurierStackType::Auto;
 	std::string taskName = "curier-task";
 
 	uint32_t requestTimeoutMs = 10000;
@@ -188,8 +186,12 @@ struct CurierDiagnostics {
 	uint32_t retried = 0;
 	uint32_t cancelled = 0;
 	size_t stackHighWaterMarkBytes = 0;
-	CurierStackType requestedStackType = CurierStackType::Auto;
-	CurierStackType actualStackType = CurierStackType::Internal;
+	Strata::Placement allocationPlacement = Strata::Placement::Default;
+	Strata::Placement requestedStackPlacement = Strata::Placement::Default;
+	Strata::Region stackRegion = Strata::Region::Unknown;
+	Strata::Placement queueStoragePlacement = Strata::Placement::Default;
+	Strata::Region queueStorageRegion = Strata::Region::Unknown;
+	Strata::Region shutdownSignalControlRegion = Strata::Region::Unknown;
 };
 
 class Curier {
@@ -222,5 +224,5 @@ class Curier {
 	const char *statusToString(CurierStatus status) const;
 
   private:
-	std::unique_ptr<CurierImpl> _impl;
+	Strata::UniquePtr<CurierImpl> _impl;
 };

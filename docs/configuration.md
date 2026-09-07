@@ -1,5 +1,43 @@
 # Configuration
 
+## Memory policy
+
+Curier `v0.2.0` uses the ZekStack-standard `Strata::MemoryPolicy`:
+
+```cpp
+CurierConfig config;
+config.memory.allocation = Strata::Placement::Default;
+config.memory.taskStack = Strata::Placement::PreferExternal;
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `memory.allocation` | `Default` | Placement for Curier-owned movable runtime storage. |
+| `memory.taskStack` | `PreferExternal` | Placement for the Curier worker-task stack. |
+
+`memory.allocation` covers Curier-owned runtime copies and working storage such
+as queue backing, accepted subscriptions and serialized payloads, JWT cache,
+crypto buffers, Curier-created ArduinoJson documents, and HTTP scratch strings.
+The internal implementation object, FreeRTOS control blocks, mutex control
+storage, and shutdown semaphore control storage remain internal for safety.
+
+`memory.taskStack` accepts the shared Strata placement vocabulary:
+
+* `Default` uses the backend default.
+* `Internal` requires internal memory.
+* `PreferExternal` prefers external RAM and falls back to internal memory.
+* `RequireExternal` fails initialization instead of consuming internal memory
+  when an external stack cannot be allocated.
+
+The `v0.1.0` mapping is:
+
+| Curier v0.1.0 | Curier v0.2.0 |
+| --- | --- |
+| `CurierStackType::Auto` | `Strata::Placement::PreferExternal` |
+| `CurierStackType::Internal` | `Strata::Placement::Internal` |
+| `CurierStackType::Psram` | `Strata::Placement::RequireExternal` |
+| `stackType` | `memory.taskStack` |
+
 ## Delivery and queue limits
 
 | Field | Default | Meaning |
@@ -11,9 +49,8 @@
 | `ttlSeconds` | 2419200 | Web Push `TTL` header value. |
 
 `maxPayloadBytes` must be from 1 through 3993. The maximum is derived from one
-4096-byte RFC 8188 encrypted record and Curier's record overhead.
-
-Web Push TTL values must not exceed 2,147,483,648 seconds.
+4096-byte RFC 8188 encrypted record and Curier's record overhead. Web Push TTL
+values must not exceed 2,147,483,648 seconds.
 
 ## Worker task
 
@@ -22,13 +59,11 @@ Web Push TTL values must not exceed 2,147,483,648 seconds.
 | `stackSize` | 4096 | FreeRTOS task stack size in bytes on ESP-IDF. |
 | `priority` | 1 | Worker priority. |
 | `coreId` | `tskNO_AFFINITY` | Worker core affinity. |
-| `stackType` | `Auto` | Internal, PSRAM, or automatic stack placement. |
 | `taskName` | `curier-task` | FreeRTOS task name. |
 
-`CurierStackType::Auto` first attempts a PSRAM stack when ESP-IDF supports
-capability-aware task creation and PSRAM is available. It falls back to
-internal memory. `Psram` is strict and fails initialization when an external
-stack cannot be created.
+Stack size must be at least 1024 bytes and aligned to `sizeof(StackType_t)`.
+Use `CurierDiagnostics::stackHighWaterMarkBytes` to qualify the configured size
+under real TLS, cryptography, payload, retry, and callback workloads.
 
 ## Retry settings
 

@@ -10,6 +10,33 @@ The public key must decode to a 65-byte uncompressed P-256 point beginning with
 The configured public and private keys are individually shaped correctly but
 do not form one key pair. Generate or provision them together.
 
+## `InvalidConfig` for memory policy
+
+`memory.allocation` and `memory.taskStack` must contain valid
+`Strata::Placement` values. Curier validates the complete
+`Strata::MemoryPolicy` before creating runtime storage.
+
+## `TaskCreateFailed` with `RequireExternal`
+
+`Strata::Placement::RequireExternal` is strict. Initialization fails if the
+target cannot supply external memory for the requested worker stack. Use
+`PreferExternal` when internal fallback is acceptable.
+
+On successful initialization, compare policy and observed storage:
+
+```cpp
+CurierDiagnostics diag = curier.diagnostics();
+ESP_LOGI(
+    "WEBPUSH",
+    "stack requested=%s actual=%s",
+    Strata::toString(diag.requestedStackPlacement),
+    Strata::toString(diag.stackRegion)
+);
+```
+
+A `PreferExternal` request reporting `Internal` is a valid fallback, not a
+failure.
+
 ## `ClockUnavailable`
 
 Curier received zero or failure from the custom provider, or
@@ -32,7 +59,8 @@ application storage and ask the browser to subscribe again.
 
 `queueSize` includes both queued and active work. Increase the limit only after
 measuring memory and expected burst behavior, or apply backpressure in the
-caller.
+caller. `memory.allocation` determines where Curier's queue backing and accepted
+runtime copies are placed.
 
 ## `PayloadTooLarge`
 
@@ -48,8 +76,8 @@ selected CA configuration. Inspect `CurierSendResult::transportError` with
 ## Shutdown timeout
 
 The active HTTP operation has not returned yet. Curier remains in `Stopping`
-and retains its owned state. Call `end()` again after the configured request
-timeout. Do not destroy the instance from its callback.
+and retains its Strata-owned task and runtime storage. Call `end()` again after
+the configured request timeout. Do not destroy the instance from its callback.
 
 ## Stack pressure
 

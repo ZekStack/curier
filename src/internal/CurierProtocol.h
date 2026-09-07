@@ -1,12 +1,12 @@
 #pragma once
 
-#include "../Curier.h"
+#include "CurierMemory.h"
 
-#include <string>
+#include <string_view>
 
 namespace curier_internal {
 
 CurierResult
-endpointOrigin(const std::string &endpoint, size_t maxEndpointBytes, std::string &origin);
+endpointOrigin(std::string_view endpoint, size_t maxEndpointBytes, CurierString &origin);
 
 } // namespace curier_internal

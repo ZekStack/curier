@@ -1,42 +1,94 @@
 # Memory model
 
-Curier bounds accepted work by `queueSize`. Each accepted job owns:
+Curier `v0.2.0` uses Strata `v0.1.2` as its memory-placement and low-level
+FreeRTOS ownership layer.
 
-* one copied endpoint, `p256dh` key, and `auth` secret;
-* one serialized plaintext payload bounded by `maxPayloadBytes`;
-* one copied `std::function` callback;
-* queue-record and standard-library allocation overhead.
+## Policy
 
-The active worker additionally holds an encrypted body, ephemeral key material,
-an HTTP client, and a VAPID JWT. Curier caches at most four JWTs by push-service
-origin.
+```cpp
+CurierConfig config;
+config.memory.allocation = Strata::Placement::Default;
+config.memory.taskStack = Strata::Placement::PreferExternal;
+```
 
-Queue records use normal heap storage. Worker stacks use the selected
-`CurierStackType`; `Auto` prefers a PSRAM stack where capability-aware ESP-IDF
-task creation is available and falls back to internal RAM.
+`memory.allocation` applies to Curier-owned movable runtime storage. This
+includes:
 
-Standard-library strings, vectors, JSON documents, and callbacks can allocate.
-Curier uses checked non-throwing allocation for its implementation, queue, and
-job records, but toolchain standard-library allocation behavior still applies.
-User callbacks and time/retry providers must not throw exceptions.
+* queue backing and job records;
+* accepted endpoint, `p256dh`, and `auth` copies;
+* serialized plaintext payloads;
+* copied runtime configuration strings;
+* VAPID JWT cache entries;
+* Curier-created ArduinoJson documents;
+* crypto decode, HKDF, ciphertext, Base64, and JWT working buffers;
+* HTTP authorization and response scratch storage that requires dynamic memory.
 
-The VAPID private-key copy, cached JWTs, subscription auth secrets, accepted
-plaintext payload buffers, deterministic crypto-test inputs, and intermediate
-key buffers are overwritten before normal release. This reduces secret residue
-but does not replace whole-device heap, crash-dump, and physical security
-controls.
+`memory.taskStack` controls only the Curier worker stack. `PreferExternal`
+preserves the old automatic PSRAM behavior by falling back to internal memory.
+`RequireExternal` is strict and fails task creation when external storage cannot
+be provided.
 
-A successful `end()` deletes the worker from the owner task before freeing the
-queue, semaphore, cryptographic state, and configuration. Capability-created
-PSRAM tasks are deleted with `vTaskDeleteWithCaps`; normal tasks are deleted
-with `vTaskDelete`. This makes task stack and TCB reclamation part of the public
-shutdown completion boundary rather than deferred worker self-cleanup.
+Safety-critical FreeRTOS control storage remains internal: Strata keeps task
+TCBs, recursive-mutex control blocks, and binary-semaphore control blocks in
+internal RAM even when movable storage prefers external memory.
+
+## Caller-owned and dependency-owned memory
+
+Public `CurierConfig`, `CurierSubscription`, `CurierPayload`, and caller-created
+`JsonDocument` objects remain normal caller-owned C++ objects. Allocations made
+while the application constructs those objects occur before Curier accepts
+them and are outside Curier's memory policy.
+
+`std::function` remains the callback/time-provider/retry-policy surface. Memory
+allocated by the caller while constructing captures is likewise outside
+Curier's owned allocation boundary; Curier moves or copies the resulting
+function object as part of its API contract.
+
+ESP-IDF HTTP client and Mbed TLS internals may allocate memory inside those
+dependencies. Curier does not intercept their allocators. The Strata policy
+covers allocations directly owned or explicitly created by Curier.
+
+## Queue bound
+
+`queueSize` bounds all accepted work, including the active job. Each accepted
+job owns its copied subscription, serialized plaintext payload, callback, and
+job-record overhead. The active worker additionally owns an encrypted body,
+ephemeral cryptographic working storage, HTTP request scratch data, and a VAPID
+JWT. Curier caches at most four JWTs by push-service origin.
+
+## Secret cleanup
+
+The copied VAPID private key, cached JWTs, subscription auth secrets, accepted
+plaintext payloads, deterministic crypto-test inputs, and intermediate key
+buffers are explicitly overwritten before normal release where Curier owns the
+storage. Selecting external placement does not disable this cleanup; sensitive
+Curier-owned buffers may reside in external RAM when that policy is requested.
+
+This reduces secret residue but does not replace whole-device heap, crash-dump,
+and physical security controls.
+
+## Shutdown ownership
+
+The worker never self-deletes its Strata task owner. When shutdown completes its
+work, it publishes final diagnostics, gives a Strata binary semaphore, and
+suspends. `end()` then resets `Strata::FreeRTOS::Task` from the calling owner
+context. That reset deletes the FreeRTOS task and releases its stack and TCB
+before queue, semaphore, cryptographic state, JWT cache, and runtime config are
+released.
+
+A successful `end()` therefore includes physical task-storage reclamation in
+the public completion boundary. A timeout preserves the `Stopping` state and
+owned storage so a later `end()` can finish safely.
+
+## Diagnostics and qualification
+
+`CurierDiagnostics` separates policy from observed storage. In particular,
+`requestedStackPlacement` can be `PreferExternal` while `stackRegion` is
+`Internal` after a valid fallback. Queue storage exposes the same distinction
+through `queueStoragePlacement` and `queueStorageRegion`.
 
 `tests/esp32/LifecycleSmoke` repeatedly initializes and ends Curier with
-Internal, Auto, and PSRAM stack selection where available, then compares
-internal and external heap against a warmed baseline. Run this test on every
-production board because compile success cannot qualify allocator recovery.
-
-Use `CurierDiagnostics` to measure queue and stack pressure on each real target.
-Compile success does not qualify a stack size for live TLS, cryptography,
-payload, retry, and callback workloads.
+Internal, PreferExternal, and RequireExternal stack policies where supported,
+then compares internal and external heap against a warmed baseline. Run this
+test on every production board because compile success does not qualify
+allocator recovery or a safe stack size.

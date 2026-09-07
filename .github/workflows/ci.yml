@@ -15,6 +15,7 @@ env:
   PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
   PIOARDUINO_PLATFORM_VERSION: 55.03.39
   PIOARDUINO_VERSION: 6.1.19
+  STRATA_VERSION: v0.1.2
 
 jobs:
   metadata:
@@ -40,10 +41,11 @@ jobs:
     runs-on: [self-hosted, zekstack-ci]
     steps:
       - uses: actions/checkout@v4
-      - name: Audit library boundaries, protocol, and lifecycle
+      - name: Audit library boundaries, protocol, lifecycle, and ownership
         run: |
+          set -e
           if grep -RInE '#include[[:space:]]+[<"](Accord|Flow|Fresh|Link|Phase|Pulse|Seal|Signal|Tempo|Trace|Worker)\.h[>"]' src; then
-            echo "Curier must not depend on another ZekStack library"
+            echo "Curier must not depend on another ZekStack library except Strata"
             exit 1
           fi
           if grep -RInE '"aesgcm"|Content-Encoding:[[:space:]]+aesgcm' src; then
@@ -58,8 +60,12 @@ jobs:
             echo "Curier workers must be deleted by the owner task"
             exit 1
           fi
-          if ! grep -q 'task::destroy(worker, createdWithCaps)' src/Curier.cpp; then
-            echo "Curier end() must delete the worker before cleanup"
+          if grep -RInE '#include[[:space:]]+[<"]esp_heap_caps\.h[>"]|freertos/idf_additions\.h' src; then
+            echo "Curier must not depend on ESP-IDF allocation internals"
+            exit 1
+          fi
+          if grep -RInE 'heap_caps_|MALLOC_CAP_|ps_malloc|xTaskCreate|vTaskDelete|xQueueCreate|xSemaphoreCreate|std::make_unique|std::make_shared|(^|[^[:alnum:]_])malloc[[:space:]]*\(|(^|[^[:alnum:]_])calloc[[:space:]]*\(|(^|[^[:alnum:]_])realloc[[:space:]]*\(|(^|[^[:alnum:]_])free[[:space:]]*\(|(^|[^[:alnum:]_])new[[:space:](]|(^|[^[:alnum:]_])delete[[:space:](]' src; then
+            echo "Curier-owned allocation and FreeRTOS storage must route through Strata"
             exit 1
           fi
 
@@ -68,11 +74,21 @@ jobs:
     needs: source-audit
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch Strata host backend
+        run: |
+          STRATA_DIR="$RUNNER_TEMP/strata"
+          rm -rf "$STRATA_DIR"
+          git clone --depth 1 --branch "${STRATA_VERSION}" \
+            https://github.com/ZekStack/strata.git "$STRATA_DIR"
+          echo "STRATA_DIR=$STRATA_DIR" >> "$GITHUB_ENV"
       - name: Build and run host protocol tests
         run: |
           g++ -std=c++20 -Wall -Wextra -pedantic \
+            -I"$STRATA_DIR/src" \
             -Itests/host/stubs \
             -Isrc \
+            "$STRATA_DIR/src/strata/Allocation.cpp" \
+            "$STRATA_DIR/src/strata/internal/PlatformGeneric.cpp" \
             src/internal/CurierProtocol.cpp \
             src/internal/CurierRetry.cpp \
             tests/host/test_retry_protocol.cpp \
@@ -87,6 +103,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Fetch Strata host backend
+        run: |
+          STRATA_DIR="$RUNNER_TEMP/strata"
+          rm -rf "$STRATA_DIR"
+          git clone --depth 1 --branch "${STRATA_VERSION}" \
+            https://github.com/ZekStack/strata.git "$STRATA_DIR"
+          echo "STRATA_DIR=$STRATA_DIR" >> "$GITHUB_ENV"
       - name: Install host crypto dependencies
         run: |
           sudo apt-get update
@@ -99,9 +122,12 @@ jobs:
           test -n "$ARDUINOJSON_HEADER"
           ARDUINOJSON_INCLUDE="$(dirname "$ARDUINOJSON_HEADER")"
           g++ -std=c++20 -Wall -Wextra -pedantic \
+            -I"$STRATA_DIR/src" \
             -I"$ARDUINOJSON_INCLUDE" \
             -Itests/host/stubs \
             -Isrc \
+            "$STRATA_DIR/src/strata/Allocation.cpp" \
+            "$STRATA_DIR/src/strata/internal/PlatformGeneric.cpp" \
             src/internal/CurierCrypto.cpp \
             tests/host/test_crypto.cpp \
             -lmbedtls -lmbedx509 -lmbedcrypto \
@@ -143,7 +169,7 @@ jobs:
               --board "${{ matrix.board }}" \
               --lib="." \
               --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
-              --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0" \
+              --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0, https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
               --project-option "build_unflags=-std=gnu++11" \
               --project-option "build_flags=-std=gnu++20"
           done
@@ -153,7 +179,7 @@ jobs:
             --board "${{ matrix.board }}" \
             --lib="." \
             --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
-            --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0" \
+            --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0, https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
             --project-option "build_unflags=-std=gnu++11" \
             --project-option "build_flags=-std=gnu++20"
       - name: Compile runtime semantics test
@@ -163,7 +189,7 @@ jobs:
             --board "${{ matrix.board }}" \
             --lib="." \
             --project-option "platform=${PIOARDUINO_PLATFORM_URL}" \
-            --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0" \
+            --project-option "lib_deps=bblanchon/ArduinoJson@7.0.0, https://github.com/ZekStack/strata.git#${STRATA_VERSION}" \
             --project-option "build_unflags=-std=gnu++11" \
             --project-option "build_flags=-std=gnu++20 -DCURIER_ENABLE_TEST_HOOKS"
 
