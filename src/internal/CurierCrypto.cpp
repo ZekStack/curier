@@ -39,8 +39,7 @@ void secureZero(void *memory, size_t size) {
 	}
 }
 
-template <typename String>
-void secureClear(String &value) {
+template <typename String> void secureClear(String &value) {
 	if (!value.empty()) {
 		secureZero(value.data(), value.size());
 	}
@@ -95,9 +94,7 @@ bool validBase64UrlShape(std::string_view input) {
 }
 
 bool decodeBase64Url(
-    std::string_view input,
-    Strata::Placement placement,
-    curier_internal::CurierBytes &output
+    std::string_view input, Strata::Placement placement, curier_internal::CurierBytes &output
 ) {
 	output.clear();
 	if (!validBase64UrlShape(input)) {
@@ -171,9 +168,7 @@ bool encodeBase64Url(
 }
 
 bool decodePublicKey(
-    std::string_view encoded,
-    Strata::Placement placement,
-    curier_internal::CurierBytes &key
+    std::string_view encoded, Strata::Placement placement, curier_internal::CurierBytes &key
 ) {
 	return (encoded.size() == 87 || encoded.size() == 88) &&
 	       decodeBase64Url(encoded, placement, key) && key.size() == kP256PublicKeyBytes &&
@@ -181,9 +176,7 @@ bool decodePublicKey(
 }
 
 bool decodePrivateKey(
-    std::string_view encoded,
-    Strata::Placement placement,
-    curier_internal::CurierBytes &key
+    std::string_view encoded, Strata::Placement placement, curier_internal::CurierBytes &key
 ) {
 	return (encoded.size() == 43 || encoded.size() == 44) &&
 	       decodeBase64Url(encoded, placement, key) && key.size() == kP256PrivateKeyBytes;
@@ -390,7 +383,9 @@ CurierResult encryptWithInputs(
 		static constexpr char kNonceInfo[] = "Content-Encoding: nonce";
 		curier_internal::CurierBytes contentInfo = makeBytes(placement);
 		contentInfo.insert(
-		    contentInfo.end(), kContentKeyInfo, kContentKeyInfo + sizeof(kContentKeyInfo) - 1
+		    contentInfo.end(),
+		    kContentKeyInfo,
+		    kContentKeyInfo + sizeof(kContentKeyInfo) - 1
 		);
 		contentInfo.push_back(0x00);
 		curier_internal::CurierBytes nonceInfo = makeBytes(placement);
@@ -797,7 +792,10 @@ CurierResult CurierCrypto::createVapidJwt(
 	payload["sub"] = subjectText.c_str();
 	if (payload.overflowed()) {
 		secureZero(privateKey.data(), privateKey.size());
-		return CurierResult::failure(CurierStatus::AllocationFailed, "VAPID JWT JSON allocation failed");
+		return CurierResult::failure(
+		    CurierStatus::AllocationFailed,
+		    "VAPID JWT JSON allocation failed"
+		);
 	}
 	CurierString payloadJson = makeCurierString(_placement);
 	CurierStringWriter writer(payloadJson);

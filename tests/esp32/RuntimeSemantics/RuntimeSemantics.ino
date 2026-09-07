@@ -104,12 +104,7 @@ void testQueueBoundAndExactlyOnce() {
 
 	curier_internal::setHttpTransportForTesting(
 	    [entered,
-	     release](
-	        const curier_internal::CurierRuntimeConfig &,
-	        curier_internal::CurierSubscriptionView,
-	        std::string_view,
-	        std::span<const uint8_t>
-	    ) {
+	     release](const curier_internal::CurierRuntimeConfig &, curier_internal::CurierSubscriptionView, std::string_view, std::span<const uint8_t>) {
 		    xSemaphoreGive(entered);
 		    xSemaphoreTake(release, portMAX_DELAY);
 		    return httpSuccess();
@@ -149,12 +144,12 @@ void testCallbackRequeueAndBusyEnd() {
 	installClock(curier);
 	std::atomic<int> callbacks{0};
 	std::atomic<CurierStatus> callbackEndStatus{CurierStatus::InternalError};
-	curier_internal::setHttpTransportForTesting([](
-	                                               const curier_internal::CurierRuntimeConfig &,
+	curier_internal::setHttpTransportForTesting([](const curier_internal::CurierRuntimeConfig &,
 	                                               curier_internal::CurierSubscriptionView,
 	                                               std::string_view,
-	                                               std::span<const uint8_t>
-	                                           ) { return httpSuccess(); });
+	                                               std::span<const uint8_t>) {
+		return httpSuccess();
+	});
 
 	expectResult(curier.init(config(2)), "requeue test init failed");
 	const CurierResult firstQueued = curier.send(
@@ -193,12 +188,7 @@ void testRetryAndCancellation() {
 	CurierSendResult terminal;
 
 	curier_internal::setHttpTransportForTesting(
-	    [&attempts](
-	        const curier_internal::CurierRuntimeConfig &,
-	        curier_internal::CurierSubscriptionView,
-	        std::string_view,
-	        std::span<const uint8_t>
-	    ) {
+	    [&attempts](const curier_internal::CurierRuntimeConfig &, curier_internal::CurierSubscriptionView, std::string_view, std::span<const uint8_t>) {
 		    const int attempt = attempts.fetch_add(1) + 1;
 		    return attempt < 3 ? httpFailure(503) : httpSuccess();
 	    }
@@ -228,12 +218,7 @@ void testRetryAndCancellation() {
 	callbacks.store(0);
 	terminal = CurierSendResult{};
 	curier_internal::setHttpTransportForTesting(
-	    [&attempts](
-	        const curier_internal::CurierRuntimeConfig &,
-	        curier_internal::CurierSubscriptionView,
-	        std::string_view,
-	        std::span<const uint8_t>
-	    ) {
+	    [&attempts](const curier_internal::CurierRuntimeConfig &, curier_internal::CurierSubscriptionView, std::string_view, std::span<const uint8_t>) {
 		    attempts.fetch_add(1);
 		    return httpFailure(503);
 	    }
@@ -272,12 +257,7 @@ void testShutdownTimeoutRecovery() {
 
 	curier_internal::setHttpTransportForTesting(
 	    [entered,
-	     release](
-	        const curier_internal::CurierRuntimeConfig &,
-	        curier_internal::CurierSubscriptionView,
-	        std::string_view,
-	        std::span<const uint8_t>
-	    ) {
+	     release](const curier_internal::CurierRuntimeConfig &, curier_internal::CurierSubscriptionView, std::string_view, std::span<const uint8_t>) {
 		    xSemaphoreGive(entered);
 		    xSemaphoreTake(release, portMAX_DELAY);
 		    return httpSuccess();

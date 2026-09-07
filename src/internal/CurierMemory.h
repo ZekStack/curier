@@ -11,8 +11,7 @@ namespace curier_internal {
 using CurierString = Strata::String;
 using CurierBytes = Strata::Vector<uint8_t>;
 
-template <typename T>
-using CurierVector = Strata::Vector<T>;
+template <typename T> using CurierVector = Strata::Vector<T>;
 
 struct CurierSubscriptionView {
 	std::string_view endpoint;
@@ -28,8 +27,7 @@ struct CurierVapidView {
 
 struct CurierOwnedSubscription {
 	explicit CurierOwnedSubscription(Strata::Placement placement) noexcept
-	    : endpoint(Strata::Allocator<char>{placement}),
-	      p256dh(Strata::Allocator<char>{placement}),
+	    : endpoint(Strata::Allocator<char>{placement}), p256dh(Strata::Allocator<char>{placement}),
 	      auth(Strata::Allocator<char>{placement}) {
 	}
 
@@ -65,10 +63,12 @@ struct CurierRuntimeConfig {
 		memory = source.memory;
 		vapidSubject.assign(source.vapidConfig.subject.data(), source.vapidConfig.subject.size());
 		vapidPublicKeyBase64.assign(
-		    source.vapidConfig.publicKeyBase64.data(), source.vapidConfig.publicKeyBase64.size()
+		    source.vapidConfig.publicKeyBase64.data(),
+		    source.vapidConfig.publicKeyBase64.size()
 		);
 		vapidPrivateKeyBase64.assign(
-		    source.vapidConfig.privateKeyBase64.data(), source.vapidConfig.privateKeyBase64.size()
+		    source.vapidConfig.privateKeyBase64.data(),
+		    source.vapidConfig.privateKeyBase64.size()
 		);
 		queueSize = source.queueSize;
 		maxPayloadBytes = source.maxPayloadBytes;
@@ -84,9 +84,7 @@ struct CurierRuntimeConfig {
 		useTlsCertBundle = source.useTlsCertBundle;
 		useGlobalCaStore = source.useGlobalCaStore;
 		skipTlsCommonNameCheck = source.skipTlsCommonNameCheck;
-		caCertificatePem.assign(
-		    source.caCertificatePem.data(), source.caCertificatePem.size()
-		);
+		caCertificatePem.assign(source.caCertificatePem.data(), source.caCertificatePem.size());
 	}
 
 	[[nodiscard]] CurierVapidView vapidView() const noexcept {

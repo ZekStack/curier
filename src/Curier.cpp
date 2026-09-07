@@ -42,8 +42,7 @@ enum class CurierLifecycle : uint8_t {
 	Stopping,
 };
 
-template <typename String>
-void secureClear(String &value) {
+template <typename String> void secureClear(String &value) {
 	volatile char *cursor = value.empty() ? nullptr : value.data();
 	for (size_t index = 0; index < value.size(); ++index) {
 		cursor[index] = 0;
@@ -64,8 +63,7 @@ struct SecureStringGuard {
 
 struct CurierJob {
 	explicit CurierJob(Strata::Placement placement) noexcept
-	    : subscription(placement),
-	      origin(Strata::Allocator<char>{placement}),
+	    : subscription(placement), origin(Strata::Allocator<char>{placement}),
 	      payload(Strata::Allocator<char>{placement}) {
 	}
 
@@ -263,7 +261,10 @@ struct CurierImpl {
 		}
 
 		if (!config || !crypto) {
-			return CurierResult::failure(CurierStatus::InternalError, "Curier runtime is unavailable");
+			return CurierResult::failure(
+			    CurierStatus::InternalError,
+			    "Curier runtime is unavailable"
+			);
 		}
 		uint64_t expiresAt = 0;
 		CurierResult created = crypto->createVapidJwt(
@@ -281,7 +282,10 @@ struct CurierImpl {
 		CurierLock lock(mutex);
 		if (!lock || !jwtCache) {
 			secureClear(jwt);
-			return CurierResult::failure(CurierStatus::InternalError, "Curier JWT cache is unavailable");
+			return CurierResult::failure(
+			    CurierStatus::InternalError,
+			    "Curier JWT cache is unavailable"
+			);
 		}
 		CurierJwtCacheEntry *target = nullptr;
 		for (CurierJwtCacheEntry &entry : *jwtCache) {
@@ -381,7 +385,9 @@ struct CurierImpl {
 				} else {
 					if (encryptedBody.empty()) {
 						CurierResult encrypted = crypto->encrypt(
-						    view(job.payload), job.subscription.view(), encryptedBody
+						    view(job.payload),
+						    job.subscription.view(),
+						    encryptedBody
 						);
 						if (!encrypted) {
 							return sendResult(
@@ -434,9 +440,8 @@ struct CurierImpl {
 					decision.delayMs = config->retry.maxDelayMs;
 				}
 			} else {
-				decision = curier_internal::defaultRetryDecision(
-				    config->retry, context, esp_random()
-				);
+				decision =
+				    curier_internal::defaultRetryDecision(config->retry, context, esp_random());
 			}
 			if (!decision.retry) {
 				return current;
@@ -923,14 +928,19 @@ CurierResult Curier::send(
 		const Strata::Placement placement = _impl->config->memory.allocation;
 		curier_internal::CurierString serialized{Strata::Allocator<char>{placement}};
 		CurierResult payloadResult = curier_internal::serializePayload(
-		    payload, _impl->config->maxPayloadBytes, placement, serialized
+		    payload,
+		    _impl->config->maxPayloadBytes,
+		    placement,
+		    serialized
 		);
 		if (!payloadResult) {
 			return payloadResult;
 		}
 		curier_internal::CurierString origin{Strata::Allocator<char>{placement}};
 		CurierResult endpointResult = curier_internal::endpointOrigin(
-		    subscription.endpoint, _impl->config->maxEndpointBytes, origin
+		    subscription.endpoint,
+		    _impl->config->maxEndpointBytes,
+		    origin
 		);
 		if (!endpointResult) {
 			return endpointResult;
@@ -986,7 +996,9 @@ CurierResult Curier::send(
 		}
 		curier_internal::CurierString origin{Strata::Allocator<char>{placement}};
 		CurierResult endpointResult = curier_internal::endpointOrigin(
-		    subscription.endpoint, _impl->config->maxEndpointBytes, origin
+		    subscription.endpoint,
+		    _impl->config->maxEndpointBytes,
+		    origin
 		);
 		if (!endpointResult) {
 			return endpointResult;

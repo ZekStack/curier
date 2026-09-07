@@ -130,8 +130,7 @@ CurierHttpResponse sendWebPushRequest(
 	const int ttlLength = std::snprintf(ttl.data(), ttl.size(), "%u", config.ttlSeconds);
 	if (ttlLength <= 0 || static_cast<size_t>(ttlLength) >= ttl.size()) {
 		esp_http_client_cleanup(client);
-		response.result =
-		    sendFailure(CurierStatus::InternalError, "HTTP TTL formatting failed");
+		response.result = sendFailure(CurierStatus::InternalError, "HTTP TTL formatting failed");
 		return response;
 	}
 

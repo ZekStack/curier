@@ -31,7 +31,8 @@ class CurierCrypto {
 	CurierResult validateSubscription(CurierSubscriptionView subscription);
 	CurierResult validateSubscription(const CurierSubscription &subscription);
 
-	CurierResult encrypt(std::string_view plaintext, CurierSubscriptionView subscription, CurierBytes &body);
+	CurierResult
+	encrypt(std::string_view plaintext, CurierSubscriptionView subscription, CurierBytes &body);
 
 	CurierResult createVapidJwt(
 	    CurierVapidView vapid,

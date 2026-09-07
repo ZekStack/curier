@@ -10,10 +10,7 @@ CurierResult serializePayload(
     Strata::Placement placement,
     CurierString &json
 );
-CurierResult serializePayload(
-    const JsonDocument &payload,
-    size_t maxPayloadBytes,
-    CurierString &json
-);
+CurierResult
+serializePayload(const JsonDocument &payload, size_t maxPayloadBytes, CurierString &json);
 
 } // namespace curier_internal

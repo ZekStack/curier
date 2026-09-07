@@ -90,9 +90,7 @@ bool validBracketedIpv6(std::string_view host) {
 
 void appendLowerAscii(curier_internal::CurierString &output, std::string_view value) {
 	for (char character : value) {
-		output.push_back(
-		    static_cast<char>(std::tolower(static_cast<unsigned char>(character)))
-		);
+		output.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
 	}
 }
 
@@ -104,7 +102,8 @@ CurierResult
 endpointOrigin(std::string_view endpoint, size_t maxEndpointBytes, CurierString &origin) {
 	origin.clear();
 	if (endpoint.empty() || endpoint.size() > maxEndpointBytes || !startsWithHttps(endpoint) ||
-	    endpoint.find('#') != std::string_view::npos || endpoint.find('\\') != std::string_view::npos) {
+	    endpoint.find('#') != std::string_view::npos ||
+	    endpoint.find('\\') != std::string_view::npos) {
 		return CurierResult::failure(
 		    CurierStatus::InvalidSubscription,
 		    "subscription endpoint must be a bounded HTTPS URL without a fragment"

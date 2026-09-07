@@ -75,9 +75,7 @@ class CurierStringWriter {
 };
 
 CurierResult validateAndSerialize(
-    JsonVariantConst payload,
-    size_t maxPayloadBytes,
-    curier_internal::CurierString &json
+    JsonVariantConst payload, size_t maxPayloadBytes, curier_internal::CurierString &json
 ) {
 	json.clear();
 	if (!payload.is<JsonObjectConst>()) {
