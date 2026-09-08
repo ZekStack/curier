@@ -17,6 +17,8 @@ extern "C" {
 
 namespace {
 
+constexpr size_t kIpv6TextBufferSize = 46;
+
 bool startsWithHttps(std::string_view value) {
 	static constexpr std::string_view kScheme = "https://";
 	if (value.size() < kScheme.size()) {
@@ -78,7 +80,7 @@ bool validBracketedIpv6(std::string_view host) {
 		return false;
 	}
 	const std::string_view address = host.substr(1, host.size() - 2);
-	std::array<char, INET6_ADDRSTRLEN> text{};
+	std::array<char, kIpv6TextBufferSize> text{};
 	if (address.size() + 1 > text.size()) {
 		return false;
 	}
