@@ -2,14 +2,14 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: curier-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   PIOARDUINO_PLATFORM_URL: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
@@ -139,6 +139,7 @@ jobs:
     needs: [source-audit, host-tests, crypto-tests]
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         board:
           - esp32dev
