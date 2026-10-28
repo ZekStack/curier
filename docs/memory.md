@@ -1,6 +1,6 @@
 # Memory model
 
-Curier `v0.2.0` uses Strata `v0.1.2` as its memory-placement and low-level
+Curier `v0.2.0` uses Strata `v0.1.4` as its memory-placement and low-level
 FreeRTOS ownership layer.
 
 ## Policy
