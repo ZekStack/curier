@@ -1,5 +1,7 @@
 # Curier
 
+> Current version: **v0.3.0**; pinned Strata version **v0.1.4**.
+
 Curier is an asynchronous Web Push client for Arduino ESP32 with VAPID
 authentication, RFC 8291 `aes128gcm` payload encryption, bounded work queues,
 and Strata-backed memory ownership.
@@ -33,9 +35,9 @@ FreeRTOS storage.
 
 ## Dependencies
 
-Curier `v0.2.0` requires:
+Curier `v0.3.0` requires:
 
-* Strata `v0.1.2`
+* Strata `v0.1.4`
 * ArduinoJson `>= 7.0.0`
 
 ### PlatformIO
@@ -47,7 +49,7 @@ board = esp32dev
 framework = arduino
 
 lib_deps =
-  https://github.com/ZekStack/curier.git#v0.2.0
+  https://github.com/ZekStack/curier.git#v0.3.0
   bblanchon/ArduinoJson@>=7.0.0
 
 build_flags =
@@ -56,7 +58,7 @@ build_unflags =
   -std=gnu++11
 ```
 
-Curier's `library.json` pins Strata `v0.1.2`, so PlatformIO resolves it as a
+Curier's `library.json` pins Strata `v0.1.4`, so PlatformIO resolves it as a
 transitive dependency.
 
 ### Arduino IDE
@@ -286,7 +288,7 @@ Start with `examples/Basic`.
 | --- | --- |
 | Framework | Arduino ESP32 |
 | Language | C++20 |
-| Memory layer | Strata `v0.1.2` |
+| Memory layer | Strata `v0.1.4` |
 | Networking | ESP-IDF `esp_http_client` |
 | Encryption | RFC 8291/8188 `aes128gcm` only |
 | Authentication | VAPID ES256 |

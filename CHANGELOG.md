@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Pin Strata v0.1.4 across the PlatformIO manifest and host/firmware CI.
+- Advance Curier to v0.3.0 with synchronized release metadata.
+
 All notable changes to Curier are documented in this file.
 
 ## 0.2.0
